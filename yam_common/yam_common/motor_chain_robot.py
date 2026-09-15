@@ -168,7 +168,8 @@ class MotorChainRobot:
             )
             self._joint_limits = joint_limits
 
-        self._command_lock = threading.Lock()
+        self._command_lock = threading.RLock()
+        self._safety_stopped = False
         self._state_lock = threading.Lock()
         self.control_loop_error: Optional[BaseException] = None
         self._joint_state: Optional[JointStates] = None
@@ -248,14 +249,29 @@ class MotorChainRobot:
                     iteration_count = 0
         except Exception as exc:
             self.control_loop_error = exc
-            logging.exception("%s: robot server error, entering zero-torque mode", self)
-            try:
-                self.zero_torque_mode()
-            except Exception:
-                pass
+            logging.exception("%s: control loop failed; holding is NOT confirmed", self)
+            with self._command_lock:
+                self._safety_stopped = True
+                # Invalidate any queued trajectory even if the gravity loop has failed.
+                # This is best effort with last feedback, never reported as a healthy stop.
+                try:
+                    with self._state_lock:
+                        pos = self.remapper.to_robot_joint_pos_space(self._joint_state.pos.copy())
+                    if not np.all(np.isfinite(pos)):
+                        raise RuntimeError("No finite feedback for fault hold")
+                    self.motor_chain.set_commands(
+                        np.zeros(len(self.motor_chain)), pos=pos, vel=np.zeros_like(pos),
+                        kp=self._kp.copy(), kd=self._kd.copy(),
+                    )
+                except Exception:
+                    logging.exception("%s: fault hold publication failed; support the arm", self)
             self._stop_event.set()
 
     def update(self) -> None:
+        with self._command_lock:
+            self._update_locked()
+
+    def _update_locked(self) -> None:
         with self._command_lock:
             joint_commands = copy.deepcopy(self._commands)
         with self._state_lock:
@@ -366,6 +382,8 @@ class MotorChainRobot:
     def command_joint_pos(self, joint_pos: np.ndarray) -> None:
         pos = self._clip_robot_joint_pos_command(joint_pos)
         with self._command_lock:
+            if self._safety_stopped:
+                raise RuntimeError("YAM stop is latched")
             self._commands = JointCommands.init_all_zero(len(self.motor_chain))
             self._commands.pos = self.remapper.to_robot_joint_pos_space(pos)
             self._commands.kp = self._kp
@@ -374,10 +392,12 @@ class MotorChainRobot:
     def command_joint_state(self, joint_state: Dict[str, np.ndarray]) -> None:
         pos = self._clip_robot_joint_pos_command(joint_state["pos"])
         vel = joint_state["vel"]
-        self._commands = JointCommands.init_all_zero(len(self.motor_chain))
         kp = joint_state.get("kp", self._kp)
         kd = joint_state.get("kd", self._kd)
         with self._command_lock:
+            if self._safety_stopped:
+                raise RuntimeError("YAM stop is latched")
+            self._commands = JointCommands.init_all_zero(len(self.motor_chain))
             self._commands.pos = self.remapper.to_robot_joint_pos_space(pos)
             self._commands.vel = self.remapper.to_robot_joint_vel_space(vel)
             self._commands.kp = kp
@@ -386,6 +406,8 @@ class MotorChainRobot:
     def zero_torque_mode(self) -> None:
         logging.info(f"Entering zero_torque_mode for {self}")
         with self._command_lock:
+            if self._safety_stopped:
+                raise RuntimeError("YAM stop is latched")
             self._commands = JointCommands.init_all_zero(len(self.motor_chain))
             self._kp = np.zeros(len(self.motor_chain))
             self._kd = np.zeros(len(self.motor_chain))
@@ -420,7 +442,33 @@ class MotorChainRobot:
         print("Robot closed with all torques set to zero.")
 
     def update_kp_kd(self, kp: np.ndarray, kd: np.ndarray) -> None:
-        assert kp.shape == self._kp.shape == kd.shape
-        self._kp = kp
-        self._kd = kd
+        with self._command_lock:
+            if self._safety_stopped:
+                raise RuntimeError("YAM stop is latched")
+            assert kp.shape == self._kp.shape == kd.shape
+            self._kp = kp.copy()
+            self._kd = kd.copy()
 
+    def emergency_stop(self, kp: np.ndarray, kd: np.ndarray) -> None:
+        """Latch and publish one measured-position hold with zero target velocity.
+
+        Serializes with update so an older target cannot be published after return.
+        No software hold is possible if CAN or the control loop has failed.
+        """
+        with self._command_lock:
+            if self._safety_stopped:
+                self.raise_if_unhealthy()
+                return
+            self._safety_stopped = True
+            self.raise_if_unhealthy()
+            with self._state_lock:
+                pos = self._joint_state.pos.copy()
+            if not np.all(np.isfinite(pos)):
+                raise RuntimeError("Cannot hold non-finite feedback")
+            commands = JointCommands.init_all_zero(len(self.motor_chain))
+            commands.pos = self.remapper.to_robot_joint_pos_space(pos)
+            commands.kp = kp.copy()
+            commands.kd = kd.copy()
+            self._commands = commands
+            self._kp, self._kd = kp.copy(), kd.copy()
+            self._update_locked()

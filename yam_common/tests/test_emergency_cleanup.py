@@ -56,15 +56,15 @@ def test_camera_connect_failure_skips_interactive_shutdown_wait(monkeypatch) -> 
     with pytest.raises(RuntimeError, match="camera connect failed"):
         follower.connect()
 
-    assert robot.zero_torque is True
-    assert robot.closed is True
-    assert arm.is_connected is False
+    assert robot.zero_torque is False
+    assert robot.closed is False
+    assert arm.is_connected is True
+    assert arm.safety_state == "stopped"
 
 
-def test_explicit_disconnect_still_invokes_interactive_wait(monkeypatch) -> None:
+def test_explicit_disconnect_holds_without_interactive_wait(monkeypatch) -> None:
     from yam_common import YAMArm, YAMArmConfig
 
-    holds: list[bool] = []
     robot = FakeRobot()
     arm = YAMArm(
         YAMArmConfig(
@@ -74,18 +74,16 @@ def test_explicit_disconnect_still_invokes_interactive_wait(monkeypatch) -> None
         ),
         robot_factory=lambda **kwargs: robot,
     )
-    monkeypatch.setattr(arm, "_hold_zero_gravity_before_shutdown", lambda: holds.append(True))
+    monkeypatch.setattr("builtins.input", _boom_interactive_wait)
     arm.connect()
     arm.disconnect()
-    assert holds == [True]
-    assert robot.zero_torque is True
-    assert robot.closed is True
+    assert robot.zero_torque is False
+    assert robot.closed is False
 
 
 def test_emergency_cleanup_does_not_invoke_interactive_wait(monkeypatch) -> None:
     from yam_common import YAMArm, YAMArmConfig
 
-    holds: list[bool] = []
     robot = FakeRobot()
     arm = YAMArm(
         YAMArmConfig(
@@ -95,10 +93,10 @@ def test_emergency_cleanup_does_not_invoke_interactive_wait(monkeypatch) -> None
         ),
         robot_factory=lambda **kwargs: robot,
     )
-    monkeypatch.setattr(arm, "_hold_zero_gravity_before_shutdown", lambda: holds.append(True))
+    monkeypatch.setattr("builtins.input", _boom_interactive_wait)
     arm.connect()
     arm.emergency_cleanup()
-    assert holds == []
-    assert robot.zero_torque is True
-    assert robot.closed is True
-    assert arm.is_connected is False
+    assert robot.zero_torque is False
+    assert robot.closed is False
+    assert arm.is_connected is True
+    assert arm.safety_state == "stopped"

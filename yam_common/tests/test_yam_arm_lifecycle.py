@@ -52,13 +52,15 @@ def test_connect_hold_rest_zero_torque_and_close() -> None:
     assert "joint_eff" in telemetry
 
     arm.disconnect()
+    assert arm.is_connected is True
+    assert not robot.closed
+    arm.release_after_support()
     assert arm.is_connected is False
     assert robot.closed is True
     assert robot.zero_torque is True
     with pytest.raises(YAMArmNotConnectedError):
         arm.get_observation()
-    with pytest.raises(YAMArmNotConnectedError):
-        arm.disconnect()
+    arm.disconnect()  # idempotent cleanup
 
 
 def test_public_apis_fail_after_control_loop_dies() -> None:

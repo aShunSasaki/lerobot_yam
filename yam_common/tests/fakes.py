@@ -80,6 +80,11 @@ class FakeRobot:
         self.commands.append(pos)
         self.pos = pos
 
+    def emergency_stop(self, kp, kd):
+        self._raise_if_unhealthy()
+        self.command_joint_pos(self.pos.copy())
+        self.vel[:] = 0
+
     def zero_torque_mode(self) -> None:
         self.zero_torque = True
 

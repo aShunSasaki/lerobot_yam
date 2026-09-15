@@ -61,11 +61,10 @@ def test_rest_pose_nonfinite_raises() -> None:
         YAMArmConfig(rest_pose=(0.0, 1.0, 1.0, 0.0, 0.0, 0.0, math.inf))
 
 
-def test_rest_pose_none_raises() -> None:
+def test_rest_pose_may_be_unconfigured() -> None:
     from yam_common import YAMArmConfig
 
-    with pytest.raises(ValueError, match="rest_pose is required"):
-        YAMArmConfig(rest_pose=None)
+    assert YAMArmConfig(rest_pose=None).rest_pose is None
 
 
 def test_operator_gripper_limits_and_gains_are_used(monkeypatch) -> None:

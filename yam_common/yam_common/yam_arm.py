@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import enum
 import logging
 import os
-import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -21,6 +20,8 @@ from yam_common.dm.dm_driver import (
     probe_motors,
 )
 from yam_common.motor_chain_robot import MotorChainRobot
+from yam_common.safety import SafetyLifecycle, motion_command
+from yam_common.safety import ShutdownResult as ShutdownResult
 from yam_common.utils import GripperType
 
 logger = logging.getLogger(__name__)
@@ -83,12 +84,6 @@ DEFAULT_MOTOR_DIRECTIONS = {
 }
 
 
-class ShutdownResult(enum.Enum):
-    PARKED = "parked"
-    HOLDING_FAULT = "holding_fault"
-    NOT_CONNECTED = "not_connected"
-
-
 class YAMArmError(RuntimeError):
     """Base error for the hardware-only YAM controller."""
 
@@ -128,6 +123,8 @@ class YAMArmConfig:
     lerobot_max_step: float = 5.0
     lerobot_gripper_max_step: float = 5.0
     rest_pose: Optional[tuple[float, ...]] = None
+    park_pose_path: Optional[str] = None
+    park_release_torque: bool = False
     parking_max_joint_velocity: float = 1.0
     parking_max_joint_acceleration: float = 2.0
     parking_max_joint_jerk: float = 100.0
@@ -141,14 +138,16 @@ class YAMArmConfig:
     parking_max_tracking_error: float = 0.15
     parking_decel_velocity_threshold: float = 0.1
 
+    def validate_park_config(self) -> None:
+        from yam_common.safety import validate_park_config
+        validate_park_config(self)
+
     @property
     def arm_joint_names(self) -> tuple[str, ...]:
         return ARM_JOINT_NAMES
 
     def __post_init__(self) -> None:
         names = motor_names_for_config(self)
-        if self.rest_pose is None:
-            raise ValueError("rest_pose is required")
         for label, mapping in (
             ("motor_offsets", self.motor_offsets),
             ("motor_directions", self.motor_directions),
@@ -159,6 +158,8 @@ class YAMArmConfig:
             if missing:
                 raise ValueError(f"{label} missing keys: {missing}")
             for name in names:
+                if label in ("kp_gains", "kd_gains") and float(mapping[name]) <= 0:
+                    raise ValueError(f"{label}[{name!r}] must be positive for position holding")
                 if not np.isfinite(float(mapping[name])):
                     raise ValueError(f"{label}[{name!r}] must be finite")
         for name in names:
@@ -176,18 +177,7 @@ class YAMArmConfig:
             open_pos, closed_pos = self.gripper_limits
             if not (np.isfinite(float(open_pos)) and np.isfinite(float(closed_pos))):
                 raise ValueError("gripper_limits must be finite")
-        if len(self.rest_pose) != len(names):
-            raise ValueError(f"rest_pose must have {len(names)} values")
-        if not all(np.isfinite(float(value)) for value in self.rest_pose):
-            raise ValueError("rest_pose values must be finite")
-        for pname in ("parking_max_joint_velocity", "parking_max_joint_acceleration", "parking_max_joint_jerk"):
-            val = getattr(self, pname)
-            if not (val > 0 and np.isfinite(val)):
-                raise ValueError(f"{pname} must be positive and finite")
-        if not (0.0 < self.parking_kp_scale <= 1.0):
-            raise ValueError("parking_kp_scale must be in (0, 1]")
-        if not (0.0 < self.parking_kd_scale <= 1.0):
-            raise ValueError("parking_kd_scale must be in (0, 1]")
+        self.validate_park_config()
 
 
 def motor_names_for_config(config: YAMArmConfig) -> list[str]:
@@ -282,7 +272,7 @@ def prepare_normalized_action(
     return {f"{name}.pos": float(val) for name, val in zip(names, limited)}
 
 
-class YAMArm:
+class YAMArm(SafetyLifecycle):
     """Owns MotorChainRobot / DM CAN hardware for one YAM follower arm."""
 
     def __init__(
@@ -298,6 +288,8 @@ class YAMArm:
         self._robot: Any = None
         self._cached_obs: Optional[dict[str, np.ndarray]] = None
         self._cached_error: Optional[BaseException] = None
+        self._motion_lock = threading.RLock()
+        self.safety_state = "disconnected"
 
     @property
     def action_keys(self) -> tuple[str, ...]:
@@ -315,6 +307,7 @@ class YAMArm:
         if self.is_connected:
             raise YAMArmAlreadyConnectedError(f"{self} already connected")
         self._cached_error = None
+        self.safety_state = "active"
         try:
             if self._robot_factory is not None:
                 self._robot = self._robot_factory(config=self.config)
@@ -328,34 +321,19 @@ class YAMArm:
                 self.emergency_cleanup()
             raise
 
-    def disconnect(self) -> None:
-        if self._robot is None:
-            raise YAMArmNotConnectedError(f"{self} is not connected.")
-        self._shutdown_robot(wait_for_enter=True)
-
-    def close(self) -> None:
-        if self._robot is None:
-            return
-        self._shutdown_robot(wait_for_enter=True)
-
-    def emergency_cleanup(self) -> None:
-        """Zero-torque and close CAN without parking or interactive waiting."""
-        if self._robot is None:
-            return
-        self._shutdown_robot(wait_for_enter=False, park=False)
-
     def get_observation(self) -> dict[str, float]:
         self._ensure_healthy()
         return normalize_from_physical(self.get_joint_pos(), self.config)
 
+    @motion_command
     def send_action(self, action: Mapping[str, float]) -> dict[str, float]:
         self._ensure_healthy()
         current = normalize_from_physical(self.get_joint_pos(), self.config)
         performed = prepare_normalized_action(action, current, self.config, log_clamp=True)
         try:
             self._robot.command_joint_pos(physical_from_normalized(performed, self.config))
-        except Exception as exc:
-            self._enter_zero_torque_mode_safely(reason="send_action error", exc=exc)
+        except Exception:
+            self.emergency_stop()
             raise
         self._refresh_cache()
         return performed
@@ -363,12 +341,13 @@ class YAMArm:
     def hold_current_pose(self) -> None:
         self.command_joint_pos(self.get_joint_pos())
 
+    @motion_command
     def command_joint_pos(self, joint_pos: np.ndarray | Sequence[float]) -> None:
         self._ensure_healthy()
         try:
             self._robot.command_joint_pos(np.asarray(joint_pos, dtype=np.float64))
-        except Exception as exc:
-            self._enter_zero_torque_mode_safely(reason="command_joint_pos error", exc=exc)
+        except Exception:
+            self.emergency_stop()
             raise
         self._refresh_cache()
 
@@ -378,6 +357,7 @@ class YAMArm:
             raise ValueError(f"{self}: rest_pose is not configured")
         self.command_joint_pos(pose)
 
+    @motion_command
     def zero_torque(self) -> None:
         self._ensure_healthy()
         self._robot.zero_torque_mode()
@@ -412,11 +392,13 @@ class YAMArm:
             "connected": self.is_connected,
             "healthy": error is None and self.is_connected,
             "error": error,
+            "safety_state": self.safety_state,
         }
 
     def health_check(self) -> None:
         self._ensure_healthy()
 
+    @motion_command
     def update_kp_kd(self, kp: np.ndarray, kd: np.ndarray) -> None:
         self._ensure_healthy()
         self._robot.update_kp_kd(kp, kd)
@@ -454,209 +436,6 @@ class YAMArm:
             self._cached_obs = self._robot.get_observations()
         except Exception:
             pass
-
-    @staticmethod
-    def _quintic(u: float) -> tuple[float, float]:
-        """u in [0, 1] -> (s, ds/du). Multiply ds/du by delta_q/T for velocity."""
-        u2 = u * u
-        u3 = u2 * u
-        u4 = u2 * u2
-        u5 = u4 * u
-        s = 10.0 * u3 - 15.0 * u4 + 6.0 * u5
-        ds_du = 30.0 * u2 - 60.0 * u3 + 30.0 * u4
-        return s, ds_du
-
-    def _compute_parking_duration(self, delta_q: np.ndarray) -> Optional[float]:
-        """Compute duration from velocity/acceleration/jerk limits. None if infeasible."""
-        cfg = self.config
-        max_dq = float(np.max(np.abs(delta_q)))
-        if max_dq < 1e-6:
-            return cfg.parking_min_duration
-        t_vel = 1.875 * max_dq / cfg.parking_max_joint_velocity
-        t_acc = (5.7735 * max_dq / cfg.parking_max_joint_acceleration) ** 0.5
-        t_jerk = (60.0 * max_dq / cfg.parking_max_joint_jerk) ** (1.0 / 3.0)
-        required = max(t_vel, t_acc, t_jerk, cfg.parking_min_duration)
-        if required > cfg.parking_max_duration:
-            return None
-        return required
-
-    def _decelerate_to_stop(self) -> np.ndarray:
-        """Smooth decel from current velocity to zero. Returns the stop position."""
-        cfg = self.config
-        pos = self._robot.get_joint_pos()
-        obs = self._robot.get_observations()
-        vel = obs.get("joint_vel", np.zeros_like(pos))
-        max_v = float(np.max(np.abs(vel)))
-        if max_v < cfg.parking_decel_velocity_threshold:
-            self._robot.command_joint_pos(pos)
-            return pos
-
-        t_decel = max(2.0 * max_v / cfg.parking_max_joint_acceleration, 0.1)
-        names = motor_names_for_config(cfg)
-        kp = np.array([cfg.kp_gains[n] * cfg.parking_kp_scale for n in names])
-        kd = np.array([cfg.kd_gains[n] * cfg.parking_kd_scale for n in names])
-        q0 = pos.copy()
-        v0 = vel.copy()
-
-        logger.info("Decelerating (T=%.2fs, max_v=%.3f rad/s)", t_decel, max_v)
-        t_start = time.monotonic()
-        while True:
-            elapsed = time.monotonic() - t_start
-            if elapsed >= t_decel:
-                break
-            u = min(elapsed / t_decel, 1.0)
-            s, _ = self._quintic(u)
-            qd_des = v0 * (1.0 - s)
-            q_des = q0 + v0 * (elapsed - t_decel * (2.5 * u**4 - 3.0 * u**5 + u**6))
-            self._robot.command_joint_state({"pos": q_des, "vel": qd_des, "kp": kp, "kd": kd})
-            time.sleep(0.004)
-
-        stop_pos = self._robot.get_joint_pos()
-        self._robot.command_joint_pos(stop_pos)
-        return stop_pos
-
-    def park_to_rest(self) -> bool:
-        """Decel + quintic park to rest_pose + settling verification.
-
-        Returns True if parked and settled; False on infeasible, tracking fault,
-        or settle timeout. On False the arm is left in HOLD.
-        """
-        if self._robot is None:
-            return False
-
-        start = self._decelerate_to_stop()
-        rest = np.array(self.config.rest_pose, dtype=np.float64)
-        delta_q = rest - start
-        duration = self._compute_parking_duration(delta_q)
-        if duration is None:
-            logger.warning("Parking infeasible (would exceed max_duration=%.1fs), holding.", self.config.parking_max_duration)
-            return False
-
-        cfg = self.config
-        names = motor_names_for_config(cfg)
-        kp = np.array([cfg.kp_gains[n] * cfg.parking_kp_scale for n in names])
-        kd = np.array([cfg.kd_gains[n] * cfg.parking_kd_scale for n in names])
-        max_track_err = cfg.parking_max_tracking_error
-
-        logger.info("Parking to rest_pose (duration=%.2fs)", duration)
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < duration:
-            u = min((time.monotonic() - t0) / duration, 1.0)
-            s, ds_du = self._quintic(u)
-            q_des = start + delta_q * s
-            qd_des = delta_q * (ds_du / duration)
-            self._robot.command_joint_state({"pos": q_des, "vel": qd_des, "kp": kp, "kd": kd})
-
-            pos_now = self._robot.get_joint_pos()
-            if float(np.max(np.abs(pos_now - q_des))) > max_track_err:
-                logger.warning("Tracking error exceeded %.3f rad during parking, aborting to HOLD.", max_track_err)
-                self._robot.command_joint_pos(pos_now)
-                return False
-            time.sleep(0.004)
-
-        self._robot.command_joint_state({"pos": rest, "vel": np.zeros_like(rest), "kp": kp, "kd": kd})
-
-        pos_tol = cfg.parking_settle_pos_tolerance
-        vel_tol = cfg.parking_settle_vel_tolerance
-        settle_dur = cfg.parking_settle_duration
-        settled_since: Optional[float] = None
-        settle_deadline = time.monotonic() + settle_dur + 1.0
-        while time.monotonic() < settle_deadline:
-            pos_now = self._robot.get_joint_pos()
-            obs = self._robot.get_observations()
-            vel_now = obs.get("joint_vel", np.zeros_like(pos_now))
-            within = (float(np.max(np.abs(pos_now - rest))) < pos_tol
-                      and float(np.max(np.abs(vel_now))) < vel_tol)
-            now = time.monotonic()
-            if within:
-                if settled_since is None:
-                    settled_since = now
-                elif now - settled_since >= settle_dur:
-                    return True
-            else:
-                settled_since = None
-            time.sleep(0.004)
-        return False
-
-    def emergency_stop(self) -> None:
-        """Decelerate to zero velocity and hold position (no trajectory to rest_pose)."""
-        if self._robot is None:
-            return
-        try:
-            self._decelerate_to_stop()
-            logger.info("Emergency stop: holding at current position.")
-        except Exception as exc:
-            logger.exception("Emergency stop hold failed: %s", exc)
-            self._enter_zero_torque_mode_safely(reason="emergency_stop fallback", exc=exc)
-
-    def controlled_shutdown(self) -> ShutdownResult:
-        """Park to rest_pose then release. Falls back to HOLD on failure."""
-        if self._robot is None:
-            return ShutdownResult.NOT_CONNECTED
-        try:
-            parked = self.park_to_rest()
-            if parked:
-                logger.info("Controlled shutdown: parked at rest_pose, releasing.")
-                self._enter_zero_torque_mode_safely(reason="controlled_shutdown", exc=None)
-                return ShutdownResult.PARKED
-            else:
-                logger.warning("Controlled shutdown: parking incomplete, holding position.")
-                return ShutdownResult.HOLDING_FAULT
-        except Exception as exc:
-            logger.exception("Controlled shutdown failed: %s — holding position.", exc)
-            try:
-                pos = self._robot.get_joint_pos()
-                self._robot.command_joint_pos(pos)
-            except Exception:
-                self._enter_zero_torque_mode_safely(reason="controlled_shutdown fallback", exc=exc)
-            return ShutdownResult.HOLDING_FAULT
-
-    def _shutdown_robot(self, *, wait_for_enter: bool = True, park: bool = True) -> None:
-        robot = self._robot
-        try:
-            if park:
-                result = self.controlled_shutdown()
-                if result is ShutdownResult.HOLDING_FAULT:
-                    logger.warning("Arm is in HOLDING_FAULT — waiting for operator before close.")
-                    self._hold_zero_gravity_before_shutdown()
-            else:
-                self._enter_zero_torque_mode_safely(reason="emergency_cleanup", exc=None)
-            if wait_for_enter and park:
-                self._hold_zero_gravity_before_shutdown()
-            if robot is not None:
-                robot.close()
-        finally:
-            self._robot = None
-
-    def _enter_zero_torque_mode_safely(self, reason: str, exc: Optional[Exception]) -> None:
-        if self._robot is None:
-            return
-        try:
-            self._robot.zero_torque_mode()
-        except Exception as zero_exc:
-            logger.exception("Failed to enter zero-torque mode (%s): %s", reason, zero_exc)
-        else:
-            if exc is not None:
-                logger.warning("Entered zero-torque mode after %s: %s", reason, exc)
-            logger.warning("Zero-torque mode active. Move the arm to a safe rest position before exit.")
-
-    def _hold_zero_gravity_before_shutdown(self) -> None:
-        if self._robot is None:
-            return
-        if not bool(self.config.shutdown_zero_gravity_wait_for_enter):
-            return
-        if sys.stdin is not None and sys.stdin.isatty():
-            logger.warning(
-                "Zero-G active. Move to a safe rest position, then press ENTER to finish shutdown."
-            )
-            try:
-                input()
-            except Exception:
-                logger.exception("Failed while waiting for ENTER; continuing shutdown.")
-        else:
-            logger.error("Zero-G active. No TTY detected; holding indefinitely before shutdown.")
-            while True:
-                time.sleep(1.0)
 
     def _validate_ready_to_open_can(self) -> None:
         if self.config.mujoco_xml_path:

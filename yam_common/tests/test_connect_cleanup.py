@@ -195,6 +195,7 @@ def test_connect_health_check_cleans_up_unhealthy_robot() -> None:
     )
     with pytest.raises(YAMArmUnhealthyError):
         arm.connect()
-    assert arm.is_connected is False
-    assert robot.closed is True
-    assert robot.zero_torque is True
+    assert arm.is_connected is True
+    assert arm.safety_state == "stop_failed"
+    assert robot.closed is False
+    assert robot.zero_torque is False

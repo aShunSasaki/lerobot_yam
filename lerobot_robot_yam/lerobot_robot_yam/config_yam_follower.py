@@ -179,7 +179,9 @@ class YAMFollowerConfig:
     # =========================================================================
     # Parking / controlled shutdown (graceful trajectory to rest pose)
     # =========================================================================
-    rest_pose: tuple[float, ...] = (0.0, 1.57, 1.57, 0.0, 0.0, 0.0, 0.0)
+    rest_pose: Optional[tuple[float, ...]] = None
+    park_pose_path: Optional[str] = None
+    park_release_torque: bool = False
     parking_max_joint_velocity: float = 1.0
     parking_max_joint_acceleration: float = 2.0
     parking_max_joint_jerk: float = 100.0

@@ -38,6 +38,8 @@ def yam_arm_config_from_follower(config: YAMFollowerRobotConfig) -> YAMArmConfig
         lerobot_max_step=config.lerobot_max_step,
         lerobot_gripper_max_step=config.lerobot_gripper_max_step,
         rest_pose=config.rest_pose,
+        park_pose_path=config.park_pose_path,
+        park_release_torque=config.park_release_torque,
         parking_max_joint_velocity=config.parking_max_joint_velocity,
         parking_max_joint_acceleration=config.parking_max_joint_acceleration,
         parking_max_joint_jerk=config.parking_max_joint_jerk,
@@ -165,23 +167,65 @@ class YAMFollower(Robot):
             raise DeviceNotConnectedError(f"{self} is not connected.")
         self._arm.zero_torque()
 
+    def emergency_stop(self) -> bool:
+        return self._arm.emergency_stop()
+
+    def controlled_shutdown(self):
+        try:
+            return self._arm.controlled_shutdown()
+        finally:
+            for cam in self.cameras.values():
+                if cam.is_connected:
+                    cam.disconnect()
+
+    def wait_for_safe_release(self) -> None:
+        """Keep the process alive while position holding needs its control thread."""
+        import sys
+        import threading
+
+        if not self._arm.is_connected:
+            return
+        logger.warning("YAM state=%s. Support arm AND payload before releasing motors.",
+                       self._arm.safety_state)
+        if not sys.stdin or not sys.stdin.isatty():
+            logger.error("No operator terminal: retaining powered hold. Hardware intervention required.")
+            threading.Event().wait()
+            return
+        while self._arm.is_connected:
+            try:
+                command = input("YAM holding: type 'release' after supporting arm and payload, or 'status': ")
+                if command.strip() == "release":
+                    self.release_after_support()
+                else:
+                    print(self._arm.get_telemetry())
+            except KeyboardInterrupt:
+                self.emergency_stop()
+                logger.warning("Stop remains latched; motors have not been released.")
+            except EOFError:
+                self.emergency_stop()
+                logger.error("Operator input closed; retaining powered hold.")
+                threading.Event().wait()
+
+    def release_after_support(self) -> None:
+        self._arm.release_after_support()
+
     def close(self) -> None:
-        if self._arm.is_connected:
-            self._arm.close()
-        for cam in self.cameras.values():
-            cam.disconnect()
+        self.disconnect()
 
     def disconnect(self) -> None:
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
+        # Generic cleanup (including destructors) must never initiate motion.
+        try:
+            self._arm.close()
+        finally:
+            for cam in self.cameras.values():
+                if cam.is_connected:
+                    cam.disconnect()
 
-        if self._arm.is_connected:
-            self._arm.disconnect()
-
-        for cam in self.cameras.values():
-            cam.disconnect()
-
-        logger.info(f"{self} disconnected.")
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if exc_type is None:
+            self.controlled_shutdown()
+        else:
+            self.disconnect()
 
     def set_zero_gravity_mode(self) -> None:
         if self._arm.is_connected:
