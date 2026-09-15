@@ -182,13 +182,16 @@ class YAMFollowerConfig:
     rest_pose: tuple[float, ...] = (0.0, 1.57, 1.57, 0.0, 0.0, 0.0, 0.0)
     parking_max_joint_velocity: float = 1.0
     parking_max_joint_acceleration: float = 2.0
+    parking_max_joint_jerk: float = 100.0
     parking_min_duration: float = 1.0
     parking_max_duration: float = 5.0
     parking_kp_scale: float = 0.5
     parking_kd_scale: float = 0.8
     parking_settle_pos_tolerance: float = 0.03
     parking_settle_vel_tolerance: float = 0.05
-    parking_settle_cycles: int = 25
+    parking_settle_duration: float = 0.1
+    parking_max_tracking_error: float = 0.15
+    parking_decel_velocity_threshold: float = 0.1
 
 @RobotConfig.register_subclass("yam_follower")
 @dataclass

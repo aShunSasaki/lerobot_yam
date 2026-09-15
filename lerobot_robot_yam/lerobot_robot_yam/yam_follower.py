@@ -40,13 +40,16 @@ def yam_arm_config_from_follower(config: YAMFollowerRobotConfig) -> YAMArmConfig
         rest_pose=config.rest_pose,
         parking_max_joint_velocity=config.parking_max_joint_velocity,
         parking_max_joint_acceleration=config.parking_max_joint_acceleration,
+        parking_max_joint_jerk=config.parking_max_joint_jerk,
         parking_min_duration=config.parking_min_duration,
         parking_max_duration=config.parking_max_duration,
         parking_kp_scale=config.parking_kp_scale,
         parking_kd_scale=config.parking_kd_scale,
         parking_settle_pos_tolerance=config.parking_settle_pos_tolerance,
         parking_settle_vel_tolerance=config.parking_settle_vel_tolerance,
-        parking_settle_cycles=config.parking_settle_cycles,
+        parking_settle_duration=config.parking_settle_duration,
+        parking_max_tracking_error=config.parking_max_tracking_error,
+        parking_decel_velocity_threshold=config.parking_decel_velocity_threshold,
     )
 
 

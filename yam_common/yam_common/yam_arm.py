@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import sys
@@ -82,6 +83,12 @@ DEFAULT_MOTOR_DIRECTIONS = {
 }
 
 
+class ShutdownResult(enum.Enum):
+    PARKED = "parked"
+    HOLDING_FAULT = "holding_fault"
+    NOT_CONNECTED = "not_connected"
+
+
 class YAMArmError(RuntimeError):
     """Base error for the hardware-only YAM controller."""
 
@@ -123,13 +130,16 @@ class YAMArmConfig:
     rest_pose: Optional[tuple[float, ...]] = None
     parking_max_joint_velocity: float = 1.0
     parking_max_joint_acceleration: float = 2.0
+    parking_max_joint_jerk: float = 100.0
     parking_min_duration: float = 1.0
     parking_max_duration: float = 5.0
     parking_kp_scale: float = 0.5
     parking_kd_scale: float = 0.8
     parking_settle_pos_tolerance: float = 0.03
     parking_settle_vel_tolerance: float = 0.05
-    parking_settle_cycles: int = 25
+    parking_settle_duration: float = 0.1
+    parking_max_tracking_error: float = 0.15
+    parking_decel_velocity_threshold: float = 0.1
 
     @property
     def arm_joint_names(self) -> tuple[str, ...]:
@@ -170,10 +180,10 @@ class YAMArmConfig:
             raise ValueError(f"rest_pose must have {len(names)} values")
         if not all(np.isfinite(float(value)) for value in self.rest_pose):
             raise ValueError("rest_pose values must be finite")
-        if not (self.parking_max_joint_velocity > 0 and np.isfinite(self.parking_max_joint_velocity)):
-            raise ValueError("parking_max_joint_velocity must be positive and finite")
-        if not (self.parking_max_joint_acceleration > 0 and np.isfinite(self.parking_max_joint_acceleration)):
-            raise ValueError("parking_max_joint_acceleration must be positive and finite")
+        for pname in ("parking_max_joint_velocity", "parking_max_joint_acceleration", "parking_max_joint_jerk"):
+            val = getattr(self, pname)
+            if not (val > 0 and np.isfinite(val)):
+                raise ValueError(f"{pname} must be positive and finite")
         if not (0.0 < self.parking_kp_scale <= 1.0):
             raise ValueError("parking_kp_scale must be in (0, 1]")
         if not (0.0 < self.parking_kd_scale <= 1.0):
@@ -447,68 +457,125 @@ class YAMArm:
 
     @staticmethod
     def _quintic(u: float) -> tuple[float, float]:
+        """u in [0, 1] -> (s, ds/du). Multiply ds/du by delta_q/T for velocity."""
         u2 = u * u
         u3 = u2 * u
         u4 = u2 * u2
         u5 = u4 * u
         s = 10.0 * u3 - 15.0 * u4 + 6.0 * u5
-        ds = 30.0 * u2 - 60.0 * u3 + 30.0 * u4
-        return s, ds
+        ds_du = 30.0 * u2 - 60.0 * u3 + 30.0 * u4
+        return s, ds_du
 
-    def _compute_parking_duration(self, delta_q: np.ndarray) -> float:
+    def _compute_parking_duration(self, delta_q: np.ndarray) -> Optional[float]:
+        """Compute duration from velocity/acceleration/jerk limits. None if infeasible."""
         cfg = self.config
         max_dq = float(np.max(np.abs(delta_q)))
         if max_dq < 1e-6:
             return cfg.parking_min_duration
         t_vel = 1.875 * max_dq / cfg.parking_max_joint_velocity
         t_acc = (5.7735 * max_dq / cfg.parking_max_joint_acceleration) ** 0.5
-        return float(np.clip(max(t_vel, t_acc), cfg.parking_min_duration, cfg.parking_max_duration))
+        t_jerk = (60.0 * max_dq / cfg.parking_max_joint_jerk) ** (1.0 / 3.0)
+        required = max(t_vel, t_acc, t_jerk, cfg.parking_min_duration)
+        if required > cfg.parking_max_duration:
+            return None
+        return required
+
+    def _decelerate_to_stop(self) -> np.ndarray:
+        """Smooth decel from current velocity to zero. Returns the stop position."""
+        cfg = self.config
+        pos = self._robot.get_joint_pos()
+        obs = self._robot.get_observations()
+        vel = obs.get("joint_vel", np.zeros_like(pos))
+        max_v = float(np.max(np.abs(vel)))
+        if max_v < cfg.parking_decel_velocity_threshold:
+            self._robot.command_joint_pos(pos)
+            return pos
+
+        t_decel = max(2.0 * max_v / cfg.parking_max_joint_acceleration, 0.1)
+        names = motor_names_for_config(cfg)
+        kp = np.array([cfg.kp_gains[n] * cfg.parking_kp_scale for n in names])
+        kd = np.array([cfg.kd_gains[n] * cfg.parking_kd_scale for n in names])
+        q0 = pos.copy()
+        v0 = vel.copy()
+
+        logger.info("Decelerating (T=%.2fs, max_v=%.3f rad/s)", t_decel, max_v)
+        t_start = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - t_start
+            if elapsed >= t_decel:
+                break
+            u = min(elapsed / t_decel, 1.0)
+            s, _ = self._quintic(u)
+            qd_des = v0 * (1.0 - s)
+            q_des = q0 + v0 * (elapsed - t_decel * (2.5 * u**4 - 3.0 * u**5 + u**6))
+            self._robot.command_joint_state({"pos": q_des, "vel": qd_des, "kp": kp, "kd": kd})
+            time.sleep(0.004)
+
+        stop_pos = self._robot.get_joint_pos()
+        self._robot.command_joint_pos(stop_pos)
+        return stop_pos
 
     def park_to_rest(self) -> bool:
-        """Quintic minimum-jerk trajectory from current position to rest_pose.
+        """Decel + quintic park to rest_pose + settling verification.
 
-        Returns True if rest_pose was reached and settled, False otherwise.
-        On failure the arm is left in HOLD (current position, gravity comp active).
+        Returns True if parked and settled; False on infeasible, tracking fault,
+        or settle timeout. On False the arm is left in HOLD.
         """
         if self._robot is None:
             return False
+
+        start = self._decelerate_to_stop()
         rest = np.array(self.config.rest_pose, dtype=np.float64)
-        start = self._robot.get_joint_pos()
         delta_q = rest - start
         duration = self._compute_parking_duration(delta_q)
-        names = motor_names_for_config(self.config)
-        kp = np.array([self.config.kp_gains[n] * self.config.parking_kp_scale for n in names])
-        kd = np.array([self.config.kd_gains[n] * self.config.parking_kd_scale for n in names])
-        step_interval = 0.004
-        pos_tol = self.config.parking_settle_pos_tolerance
-        vel_tol = self.config.parking_settle_vel_tolerance
-        settle_target = self.config.parking_settle_cycles
+        if duration is None:
+            logger.warning("Parking infeasible (would exceed max_duration=%.1fs), holding.", self.config.parking_max_duration)
+            return False
+
+        cfg = self.config
+        names = motor_names_for_config(cfg)
+        kp = np.array([cfg.kp_gains[n] * cfg.parking_kp_scale for n in names])
+        kd = np.array([cfg.kd_gains[n] * cfg.parking_kd_scale for n in names])
+        max_track_err = cfg.parking_max_tracking_error
 
         logger.info("Parking to rest_pose (duration=%.2fs)", duration)
         t0 = time.monotonic()
         while time.monotonic() - t0 < duration:
             u = min((time.monotonic() - t0) / duration, 1.0)
-            s, ds = self._quintic(u)
+            s, ds_du = self._quintic(u)
             q_des = start + delta_q * s
-            qd_des = delta_q * (ds / duration)
+            qd_des = delta_q * (ds_du / duration)
             self._robot.command_joint_state({"pos": q_des, "vel": qd_des, "kp": kp, "kd": kd})
-            time.sleep(step_interval)
+
+            pos_now = self._robot.get_joint_pos()
+            if float(np.max(np.abs(pos_now - q_des))) > max_track_err:
+                logger.warning("Tracking error exceeded %.3f rad during parking, aborting to HOLD.", max_track_err)
+                self._robot.command_joint_pos(pos_now)
+                return False
+            time.sleep(0.004)
 
         self._robot.command_joint_state({"pos": rest, "vel": np.zeros_like(rest), "kp": kp, "kd": kd})
 
-        settle_count = 0
-        settle_deadline = time.monotonic() + 1.0
+        pos_tol = cfg.parking_settle_pos_tolerance
+        vel_tol = cfg.parking_settle_vel_tolerance
+        settle_dur = cfg.parking_settle_duration
+        settled_since: Optional[float] = None
+        settle_deadline = time.monotonic() + settle_dur + 1.0
         while time.monotonic() < settle_deadline:
-            obs = self._robot.get_observations()
             pos_now = self._robot.get_joint_pos()
+            obs = self._robot.get_observations()
             vel_now = obs.get("joint_vel", np.zeros_like(pos_now))
-            if float(np.max(np.abs(pos_now - rest))) < pos_tol and float(np.max(np.abs(vel_now))) < vel_tol:
-                settle_count += 1
-                if settle_count >= settle_target:
+            within = (float(np.max(np.abs(pos_now - rest))) < pos_tol
+                      and float(np.max(np.abs(vel_now))) < vel_tol)
+            now = time.monotonic()
+            if within:
+                if settled_since is None:
+                    settled_since = now
+                elif now - settled_since >= settle_dur:
                     return True
             else:
-                settle_count = 0
-            time.sleep(step_interval)
+                settled_since = None
+            time.sleep(0.004)
         return False
 
     def emergency_stop(self) -> None:
@@ -516,24 +583,25 @@ class YAMArm:
         if self._robot is None:
             return
         try:
-            pos = self._robot.get_joint_pos()
-            self._robot.command_joint_pos(pos)
+            self._decelerate_to_stop()
             logger.info("Emergency stop: holding at current position.")
         except Exception as exc:
             logger.exception("Emergency stop hold failed: %s", exc)
             self._enter_zero_torque_mode_safely(reason="emergency_stop fallback", exc=exc)
 
-    def controlled_shutdown(self) -> None:
+    def controlled_shutdown(self) -> ShutdownResult:
         """Park to rest_pose then release. Falls back to HOLD on failure."""
         if self._robot is None:
-            return
+            return ShutdownResult.NOT_CONNECTED
         try:
             parked = self.park_to_rest()
             if parked:
                 logger.info("Controlled shutdown: parked at rest_pose, releasing.")
                 self._enter_zero_torque_mode_safely(reason="controlled_shutdown", exc=None)
+                return ShutdownResult.PARKED
             else:
                 logger.warning("Controlled shutdown: parking incomplete, holding position.")
+                return ShutdownResult.HOLDING_FAULT
         except Exception as exc:
             logger.exception("Controlled shutdown failed: %s — holding position.", exc)
             try:
@@ -541,15 +609,19 @@ class YAMArm:
                 self._robot.command_joint_pos(pos)
             except Exception:
                 self._enter_zero_torque_mode_safely(reason="controlled_shutdown fallback", exc=exc)
+            return ShutdownResult.HOLDING_FAULT
 
     def _shutdown_robot(self, *, wait_for_enter: bool = True, park: bool = True) -> None:
         robot = self._robot
         try:
             if park:
-                self.controlled_shutdown()
+                result = self.controlled_shutdown()
+                if result is ShutdownResult.HOLDING_FAULT:
+                    logger.warning("Arm is in HOLDING_FAULT — waiting for operator before close.")
+                    self._hold_zero_gravity_before_shutdown()
             else:
                 self._enter_zero_torque_mode_safely(reason="emergency_cleanup", exc=None)
-            if wait_for_enter:
+            if wait_for_enter and park:
                 self._hold_zero_gravity_before_shutdown()
             if robot is not None:
                 robot.close()
