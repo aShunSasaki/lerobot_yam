@@ -333,7 +333,7 @@ class YAMArm(SafetyLifecycle):
         try:
             self._robot.command_joint_pos(physical_from_normalized(performed, self.config))
         except Exception:
-            self.emergency_stop()
+            self.soft_stop()
             raise
         self._refresh_cache()
         return performed
@@ -347,7 +347,7 @@ class YAMArm(SafetyLifecycle):
         try:
             self._robot.command_joint_pos(np.asarray(joint_pos, dtype=np.float64))
         except Exception:
-            self.emergency_stop()
+            self.soft_stop()
             raise
         self._refresh_cache()
 

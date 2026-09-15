@@ -449,7 +449,7 @@ class MotorChainRobot:
             self._kp = kp.copy()
             self._kd = kd.copy()
 
-    def emergency_stop(self, kp: np.ndarray, kd: np.ndarray) -> None:
+    def soft_stop(self, kp: np.ndarray, kd: np.ndarray) -> None:
         """Latch and publish one measured-position hold with zero target velocity.
 
         Serializes with update so an older target cannot be published after return.

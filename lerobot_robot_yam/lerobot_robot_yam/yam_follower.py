@@ -167,8 +167,8 @@ class YAMFollower(Robot):
             raise DeviceNotConnectedError(f"{self} is not connected.")
         self._arm.zero_torque()
 
-    def emergency_stop(self) -> bool:
-        return self._arm.emergency_stop()
+    def soft_stop(self) -> bool:
+        return self._arm.soft_stop()
 
     def controlled_shutdown(self):
         try:
@@ -199,10 +199,10 @@ class YAMFollower(Robot):
                 else:
                     print(self._arm.get_telemetry())
             except KeyboardInterrupt:
-                self.emergency_stop()
+                self.soft_stop()
                 logger.warning("Stop remains latched; motors have not been released.")
             except EOFError:
-                self.emergency_stop()
+                self.soft_stop()
                 logger.error("Operator input closed; retaining powered hold.")
                 threading.Event().wait()
 

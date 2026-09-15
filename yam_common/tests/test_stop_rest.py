@@ -28,11 +28,11 @@ def test_stop_has_no_deceleration_trajectory_and_latches():
     arm, robot = make_arm()
     robot.vel[:] = 2.0
     start = robot.pos.copy()
-    assert arm.emergency_stop()
+    assert arm.soft_stop()
     assert len(robot.commands) == 1
     np.testing.assert_array_equal(robot.commands[0], start)
     assert not robot.closed and not robot.zero_torque
-    assert arm.emergency_stop()
+    assert arm.soft_stop()
     assert len(robot.commands) == 1
     for call in (
         lambda: arm.send_action({}),
@@ -50,7 +50,7 @@ def test_stop_has_no_deceleration_trajectory_and_latches():
 def test_failed_stop_is_not_reported_as_holding_or_released():
     arm, robot = make_arm()
     robot.control_loop_error = RuntimeError("CAN down")
-    assert not arm.emergency_stop()
+    assert not arm.soft_stop()
     assert arm.safety_state == "stop_failed"
     assert arm.controlled_shutdown() is ShutdownResult.STOP_FAILED
     assert not robot.closed and not robot.zero_torque
@@ -116,7 +116,7 @@ def test_stop_interrupts_rest_and_no_target_follows_stop():
     thread = threading.Thread(target=lambda: result.append(arm.move_to_rest()))
     thread.start()
     assert sent.wait(1)
-    assert arm.emergency_stop()
+    assert arm.soft_stop()
     count = len(robot.commands)
     thread.join(2)
     assert not thread.is_alive()
@@ -171,7 +171,7 @@ def test_low_level_stop_restores_gains_and_blocks_all_writers():
     robot.raise_if_unhealthy = lambda: None
     sent = []
     robot._update_locked = lambda: sent.append(robot._commands)
-    robot.emergency_stop(np.ones(7) * 80, np.ones(7) * 5)
+    robot.soft_stop(np.ones(7) * 80, np.ones(7) * 5)
     assert len(sent) == 1
     np.testing.assert_array_equal(sent[0].pos, robot._joint_state.pos)
     np.testing.assert_array_equal(sent[0].vel, np.zeros(7))

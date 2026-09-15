@@ -79,7 +79,7 @@ def motion_command(method):
             try:
                 return method(self, *args, **kwargs)
             except Exception:
-                self.emergency_stop()
+                self.soft_stop()
                 raise
 
     return guarded
@@ -99,7 +99,7 @@ class SafetyLifecycle:
             kd *= self.config.rest_kd_scale
         return kp, kd
 
-    def emergency_stop(self) -> bool:
+    def soft_stop(self) -> bool:
         """Latch a zero-velocity position target; never travel to rest pose or release torque.
 
         False means holding could not be confirmed; operator intervention is required.
@@ -113,7 +113,7 @@ class SafetyLifecycle:
             self.safety_state = "stop_failed"  # fail closed before touching hardware
             try:
                 kp, kd = self._gains()
-                self._robot.emergency_stop(kp, kd)
+                self._robot.soft_stop(kp, kd)
                 self.safety_state = "stopped"
                 logger.warning(
                     "YAM stop latched. Holding current position; CAN remains connected."
@@ -127,13 +127,13 @@ class SafetyLifecycle:
 
     def close(self):
         if self._robot is not None and self.safety_state != "at_rest":
-            self.emergency_stop()
+            self.soft_stop()
 
     def disconnect(self):
         self.close()
 
     def emergency_cleanup(self):
-        self.emergency_stop()
+        self.soft_stop()
 
     def release_after_support(self):
         """Explicit operator action: arm AND payload must already be supported.
@@ -262,7 +262,7 @@ class SafetyLifecycle:
                 self.safety_state = "at_rest"
             return True
         except BaseException as exc:
-            self.emergency_stop()
+            self.soft_stop()
             logger.exception("Parking aborted; no automatic torque release")
             # Keep signals visible to the caller after latching the stop.
             if not isinstance(exc, Exception):

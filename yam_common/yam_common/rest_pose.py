@@ -57,7 +57,7 @@ def main():
             input(
                 "Position the arm at a supported rest pose, then press ENTER to capture and HOLD: "
             )
-            if not arm.emergency_stop():
+            if not arm.soft_stop():
                 raise RuntimeError("Stop failed; support the arm and check hardware")
             pose = arm.get_joint_pos().tolist()
         document = pose_document(config, pose)
