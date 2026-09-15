@@ -7,7 +7,7 @@ import logging
 import numpy as np
 import pytest
 
-from fakes import FakeRobot
+from fakes import TEST_REST_POSE, FakeRobot
 
 
 EXPECTED_KEYS = (
@@ -26,7 +26,7 @@ def _connected_arm(robot: FakeRobot | None = None):
 
     robot = robot or FakeRobot()
     arm = YAMArm(
-        YAMArmConfig(use_gravity_compensation=False, zero_gravity_mode=True),
+        YAMArmConfig(use_gravity_compensation=False, zero_gravity_mode=True, rest_pose=TEST_REST_POSE),
         robot_factory=lambda **kwargs: robot,
     )
     arm.connect()
@@ -36,7 +36,7 @@ def _connected_arm(robot: FakeRobot | None = None):
 def test_action_and_observation_keys_are_the_seven_joint_pos_keys() -> None:
     from yam_common import YAMArm, YAMArmConfig
 
-    arm = YAMArm(YAMArmConfig())
+    arm = YAMArm(YAMArmConfig(rest_pose=TEST_REST_POSE))
     assert tuple(arm.action_keys) == EXPECTED_KEYS
     assert tuple(arm.observation_keys) == EXPECTED_KEYS
 
@@ -44,7 +44,7 @@ def test_action_and_observation_keys_are_the_seven_joint_pos_keys() -> None:
 def test_midrange_physical_pose_normalizes_to_zero_and_gripper_percent() -> None:
     from yam_common import YAMArmConfig, normalize_from_physical
 
-    config = YAMArmConfig()
+    config = YAMArmConfig(rest_pose=TEST_REST_POSE)
     mid = []
     for name in (
         "shoulder_pan",
@@ -67,7 +67,7 @@ def test_midrange_physical_pose_normalizes_to_zero_and_gripper_percent() -> None
 def test_physical_limits_map_to_plus_minus_100_and_gripper_0_100() -> None:
     from yam_common import YAMArmConfig, normalize_from_physical, physical_from_normalized
 
-    config = YAMArmConfig()
+    config = YAMArmConfig(rest_pose=TEST_REST_POSE)
     lows = [config.joint_limits[name][0] for name in config.arm_joint_names]
     highs = [config.joint_limits[name][1] for name in config.arm_joint_names]
     low_norm = normalize_from_physical(np.array(lows + [0.0]), config)
@@ -86,7 +86,7 @@ def test_physical_limits_map_to_plus_minus_100_and_gripper_0_100() -> None:
 def test_send_action_clamps_range_and_step_and_returns_performed_action() -> None:
     from yam_common import YAMArmConfig, physical_from_normalized
 
-    config = YAMArmConfig()
+    config = YAMArmConfig(rest_pose=TEST_REST_POSE)
     mid_norm = {key: 0.0 for key in EXPECTED_KEYS}
     mid_norm["gripper.pos"] = 50.0
     robot = FakeRobot(pos=physical_from_normalized(mid_norm, config))
@@ -126,6 +126,7 @@ def test_step_limiter_logs_port_and_all_clipped_joint_values(caplog) -> None:
         port="can_yam_right",
         lerobot_max_step=5.0,
         lerobot_gripper_max_step=5.0,
+        rest_pose=TEST_REST_POSE,
     )
     current = {key: 0.0 for key in EXPECTED_KEYS}
     current["gripper.pos"] = 50.0

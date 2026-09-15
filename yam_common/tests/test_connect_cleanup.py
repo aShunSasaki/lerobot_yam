@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from fakes import FakeCanInterface, FakeMotorInfo, FakeRobot
+from fakes import TEST_REST_POSE, FakeCanInterface, FakeMotorInfo, FakeRobot
 
 
 class LiveChain:
@@ -54,7 +54,7 @@ def test_failed_robot_construction_closes_live_chain(monkeypatch) -> None:
     monkeypatch.setattr("yam_common.yam_arm.time.sleep", lambda _s: None)
 
     arm = YAMArm(
-        YAMArmConfig(use_gravity_compensation=False),
+        YAMArmConfig(use_gravity_compensation=False, rest_pose=TEST_REST_POSE),
         chain_factory=chain_factory,
     )
     with pytest.raises(RuntimeError, match="xml/gains failed after chain started"):
@@ -88,7 +88,7 @@ def test_failed_wrap_read_closes_first_chain(monkeypatch) -> None:
 
     monkeypatch.setattr("yam_common.yam_arm.time.sleep", lambda _s: None)
     arm = YAMArm(
-        YAMArmConfig(use_gravity_compensation=False),
+        YAMArmConfig(use_gravity_compensation=False, rest_pose=TEST_REST_POSE),
         chain_factory=chain_factory,
     )
     with pytest.raises(RuntimeError, match="wrap read failed"):
@@ -115,6 +115,7 @@ def test_missing_model_is_rejected_before_can_opens() -> None:
         YAMArmConfig(
             use_gravity_compensation=True,
             mujoco_xml_path="/no/such/yam.xml",
+            rest_pose=TEST_REST_POSE,
         ),
         chain_factory=chain_factory,
     )
@@ -163,7 +164,7 @@ def test_successful_wrap_read_releases_bus_without_disabling(monkeypatch) -> Non
     monkeypatch.setattr("yam_common.yam_arm.MotorChainRobot", lambda **kwargs: robot)
 
     arm = YAMArm(
-        YAMArmConfig(use_gravity_compensation=False),
+        YAMArmConfig(use_gravity_compensation=False, rest_pose=TEST_REST_POSE),
         chain_factory=chain_factory,
     )
     try:
@@ -189,7 +190,7 @@ def test_connect_health_check_cleans_up_unhealthy_robot() -> None:
     robot = FakeRobot()
     robot.control_loop_error = RuntimeError("died during start")
     arm = YAMArm(
-        YAMArmConfig(use_gravity_compensation=False),
+        YAMArmConfig(use_gravity_compensation=False, rest_pose=TEST_REST_POSE),
         robot_factory=lambda **kwargs: robot,
     )
     with pytest.raises(YAMArmUnhealthyError):

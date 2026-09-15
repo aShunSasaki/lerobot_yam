@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from fakes import FakeRobot
+from fakes import TEST_REST_POSE, FakeRobot
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FOLLOWER_SRC = _REPO_ROOT / "lerobot_robot_yam"
@@ -45,6 +45,7 @@ def test_camera_connect_failure_skips_interactive_shutdown_wait(monkeypatch) -> 
         YAMArmConfig(
             use_gravity_compensation=False,
             shutdown_zero_gravity_wait_for_enter=True,
+            rest_pose=TEST_REST_POSE,
         ),
         robot_factory=lambda **kwargs: robot,
     )
@@ -69,6 +70,7 @@ def test_explicit_disconnect_still_invokes_interactive_wait(monkeypatch) -> None
         YAMArmConfig(
             use_gravity_compensation=False,
             shutdown_zero_gravity_wait_for_enter=True,
+            rest_pose=TEST_REST_POSE,
         ),
         robot_factory=lambda **kwargs: robot,
     )
@@ -89,6 +91,7 @@ def test_emergency_cleanup_does_not_invoke_interactive_wait(monkeypatch) -> None
         YAMArmConfig(
             use_gravity_compensation=False,
             shutdown_zero_gravity_wait_for_enter=True,
+            rest_pose=TEST_REST_POSE,
         ),
         robot_factory=lambda **kwargs: robot,
     )

@@ -7,14 +7,14 @@ import math
 import numpy as np
 import pytest
 
-from fakes import FakeMotorInfo, FakeRobot
+from fakes import TEST_REST_POSE, FakeMotorInfo, FakeRobot
 
 
 def test_missing_kp_key_raises() -> None:
     from yam_common import YAMArmConfig
 
     with pytest.raises(ValueError, match="kp_gains"):
-        YAMArmConfig(kp_gains={"shoulder_pan": 1.0})
+        YAMArmConfig(kp_gains={"shoulder_pan": 1.0}, rest_pose=TEST_REST_POSE)
 
 
 def test_unordered_arm_limit_raises() -> None:
@@ -24,7 +24,7 @@ def test_unordered_arm_limit_raises() -> None:
     limits = dict(DEFAULT_JOINT_LIMITS)
     limits["elbow_flex"] = (3.0, 1.0)
     with pytest.raises(ValueError, match="joint_limits"):
-        YAMArmConfig(joint_limits=limits)
+        YAMArmConfig(joint_limits=limits, rest_pose=TEST_REST_POSE)
 
 
 def test_nonfinite_offset_raises() -> None:
@@ -34,7 +34,7 @@ def test_nonfinite_offset_raises() -> None:
     offsets = dict(DEFAULT_MOTOR_OFFSETS)
     offsets["wrist_roll"] = math.nan
     with pytest.raises(ValueError, match="motor_offsets"):
-        YAMArmConfig(motor_offsets=offsets)
+        YAMArmConfig(motor_offsets=offsets, rest_pose=TEST_REST_POSE)
 
 
 def test_invalid_direction_raises() -> None:
@@ -44,7 +44,7 @@ def test_invalid_direction_raises() -> None:
     directions = dict(DEFAULT_MOTOR_DIRECTIONS)
     directions["gripper"] = 0
     with pytest.raises(ValueError, match="motor_directions"):
-        YAMArmConfig(motor_directions=directions)
+        YAMArmConfig(motor_directions=directions, rest_pose=TEST_REST_POSE)
 
 
 def test_rest_pose_wrong_length_raises() -> None:
@@ -59,6 +59,13 @@ def test_rest_pose_nonfinite_raises() -> None:
 
     with pytest.raises(ValueError, match="rest_pose"):
         YAMArmConfig(rest_pose=(0.0, 1.0, 1.0, 0.0, 0.0, 0.0, math.inf))
+
+
+def test_rest_pose_none_raises() -> None:
+    from yam_common import YAMArmConfig
+
+    with pytest.raises(ValueError, match="rest_pose is required"):
+        YAMArmConfig(rest_pose=None)
 
 
 def test_operator_gripper_limits_and_gains_are_used(monkeypatch) -> None:
@@ -108,6 +115,7 @@ def test_operator_gripper_limits_and_gains_are_used(monkeypatch) -> None:
         kp_gains=kp,
         kd_gains=kd,
         bustype="virtual",
+        rest_pose=TEST_REST_POSE,
     )
     arm = YAMArm(config, chain_factory=chain_factory)
     arm.connect()

@@ -176,8 +176,13 @@ class YAMFollowerConfig:
     lerobot_max_step: float = 5.0  # Max arm joint step per cycle in [-100,100] units
     lerobot_gripper_max_step: float = 5.0  # Max gripper step per cycle in [0,100]
 
-    # No lerobot-specific smoothing or safety knobs here. Keep this config
-    # aligned with i2rt defaults only.
+    # =========================================================================
+    # Soft-landing (graceful shutdown to rest pose)
+    # =========================================================================
+    rest_pose: tuple[float, ...] = (0.0, 1.57, 1.57, 0.0, 0.0, 0.0, 0.0)
+    soft_landing_duration: float = 3.0
+    soft_landing_kp_scale: float = 0.5
+    soft_landing_kd_scale: float = 0.8
 
 @RobotConfig.register_subclass("yam_follower")
 @dataclass

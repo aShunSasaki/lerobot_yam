@@ -8,6 +8,8 @@ from typing import Any, Optional
 import numpy as np
 import pytest
 
+TEST_REST_POSE = (0.0, 1.2, 1.1, 0.0, 0.0, 0.0, 0.0)
+
 
 @dataclass
 class FakeMotorInfo:
@@ -71,6 +73,12 @@ class FakeRobot:
         commanded = np.asarray(joint_pos, dtype=np.float64).copy()
         self.commands.append(commanded)
         self.pos = commanded
+
+    def command_joint_state(self, joint_state: dict[str, np.ndarray]) -> None:
+        self._raise_if_unhealthy()
+        pos = np.asarray(joint_state["pos"], dtype=np.float64).copy()
+        self.commands.append(pos)
+        self.pos = pos
 
     def zero_torque_mode(self) -> None:
         self.zero_torque = True

@@ -121,6 +121,9 @@ class YAMArmConfig:
     lerobot_max_step: float = 5.0
     lerobot_gripper_max_step: float = 5.0
     rest_pose: Optional[tuple[float, ...]] = None
+    soft_landing_duration: float = 3.0
+    soft_landing_kp_scale: float = 0.5
+    soft_landing_kd_scale: float = 0.8
 
     @property
     def arm_joint_names(self) -> tuple[str, ...]:
@@ -128,6 +131,8 @@ class YAMArmConfig:
 
     def __post_init__(self) -> None:
         names = motor_names_for_config(self)
+        if self.rest_pose is None:
+            raise ValueError("rest_pose is required")
         for label, mapping in (
             ("motor_offsets", self.motor_offsets),
             ("motor_directions", self.motor_directions),
@@ -155,11 +160,16 @@ class YAMArmConfig:
             open_pos, closed_pos = self.gripper_limits
             if not (np.isfinite(float(open_pos)) and np.isfinite(float(closed_pos))):
                 raise ValueError("gripper_limits must be finite")
-        if self.rest_pose is not None:
-            if len(self.rest_pose) != len(names):
-                raise ValueError(f"rest_pose must have {len(names)} values")
-            if not all(np.isfinite(float(value)) for value in self.rest_pose):
-                raise ValueError("rest_pose values must be finite")
+        if len(self.rest_pose) != len(names):
+            raise ValueError(f"rest_pose must have {len(names)} values")
+        if not all(np.isfinite(float(value)) for value in self.rest_pose):
+            raise ValueError("rest_pose values must be finite")
+        if not (np.isfinite(self.soft_landing_duration) and self.soft_landing_duration > 0):
+            raise ValueError("soft_landing_duration must be positive and finite")
+        if not (0.0 < self.soft_landing_kp_scale <= 1.0):
+            raise ValueError("soft_landing_kp_scale must be in (0, 1]")
+        if not (0.0 < self.soft_landing_kd_scale <= 1.0):
+            raise ValueError("soft_landing_kd_scale must be in (0, 1]")
 
 
 def motor_names_for_config(config: YAMArmConfig) -> list[str]:
@@ -427,9 +437,55 @@ class YAMArm:
         except Exception:
             pass
 
+    def soft_land(self) -> bool:
+        """Move from current position to rest_pose over soft_landing_duration seconds.
+
+        Returns True if rest_pose was reached, False on timeout or failure.
+        """
+        if self._robot is None:
+            return False
+        rest = np.array(self.config.rest_pose, dtype=np.float64)
+        start = self._robot.get_joint_pos()
+        duration = self.config.soft_landing_duration
+        names = motor_names_for_config(self.config)
+        kp = np.array([self.config.kp_gains[n] * self.config.soft_landing_kp_scale for n in names])
+        kd = np.array([self.config.kd_gains[n] * self.config.soft_landing_kd_scale for n in names])
+        vel_ff = (rest - start) / duration
+        step_interval = 0.004
+        threshold = 0.05
+
+        t0 = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - t0
+            if elapsed >= duration:
+                pos_now = self._robot.get_joint_pos()
+                return bool(np.all(np.abs(pos_now - rest) < threshold))
+            alpha = elapsed / duration
+            target = start + (rest - start) * alpha
+            self._robot.command_joint_state({
+                "pos": target,
+                "vel": vel_ff * (1.0 - alpha),
+                "kp": kp,
+                "kd": kd,
+            })
+            time.sleep(step_interval)
+
+    def _soft_land_safely(self) -> bool:
+        try:
+            landed = self.soft_land()
+            if landed:
+                logger.info("Soft landing complete — arm reached rest pose.")
+            else:
+                logger.warning("Soft landing timeout — falling back to zero-torque.")
+            return landed
+        except Exception as exc:
+            logger.exception("Soft landing failed: %s — falling back to zero-torque.", exc)
+            return False
+
     def _shutdown_robot(self, *, wait_for_enter: bool = True) -> None:
         robot = self._robot
         try:
+            self._soft_land_safely()
             self._enter_zero_torque_mode_safely(reason="disconnect", exc=None)
             if wait_for_enter:
                 self._hold_zero_gravity_before_shutdown()

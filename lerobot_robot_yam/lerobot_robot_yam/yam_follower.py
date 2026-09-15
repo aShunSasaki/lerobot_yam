@@ -37,6 +37,10 @@ def yam_arm_config_from_follower(config: YAMFollowerRobotConfig) -> YAMArmConfig
         limit_gripper_force=config.limit_gripper_force,
         lerobot_max_step=config.lerobot_max_step,
         lerobot_gripper_max_step=config.lerobot_gripper_max_step,
+        rest_pose=config.rest_pose,
+        soft_landing_duration=config.soft_landing_duration,
+        soft_landing_kp_scale=config.soft_landing_kp_scale,
+        soft_landing_kd_scale=config.soft_landing_kd_scale,
     )
 
 
