@@ -1,4 +1,4 @@
-"""Latched position stop and explicit normal-completion parking for YAM.
+"""Latched position stop and explicit normal-completion rest for YAM.
 
 Powered holding requires a healthy CAN/control loop. It is not a hardware E-stop.
 """
@@ -18,42 +18,42 @@ logger = logging.getLogger(__name__)
 
 
 class ShutdownResult(enum.Enum):
-    PARKED = "parked"
+    AT_REST = "at_rest"
     HOLDING_FAULT = "holding_fault"
     STOP_FAILED = "stop_failed"
     NOT_CONNECTED = "not_connected"
 
 
-def validate_park_config(cfg):
-    if cfg.park_pose_path:
+def validate_rest_config(cfg):
+    if cfg.rest_pose_path:
         if cfg.rest_pose is not None:
-            raise ValueError("Specify only one of rest_pose and park_pose_path")
-        data = json.loads(Path(cfg.park_pose_path).expanduser().read_text())
-        if data.get("schema") != "yam-park-v1":
-            raise ValueError("Unsupported park pose file")
+            raise ValueError("Specify only one of rest_pose and rest_pose_path")
+        data = json.loads(Path(cfg.rest_pose_path).expanduser().read_text())
+        if data.get("schema") != "yam-rest-v1":
+            raise ValueError("Unsupported rest pose file")
         for key in ("motor_offsets", "motor_directions", "gripper_type"):
             if data.get(key) != getattr(cfg, key):
                 raise ValueError(
-                    f"Park pose {key} does not match this robot configuration"
+                    f"Rest pose {key} does not match this robot configuration"
                 )
         cfg.rest_pose = tuple(data["rest_pose"])
     for name in (
-        "parking_max_joint_velocity",
-        "parking_max_joint_acceleration",
-        "parking_max_joint_jerk",
-        "parking_min_duration",
-        "parking_max_duration",
-        "parking_settle_pos_tolerance",
-        "parking_settle_vel_tolerance",
-        "parking_settle_duration",
-        "parking_max_tracking_error",
+        "rest_max_joint_velocity",
+        "rest_max_joint_acceleration",
+        "rest_max_joint_jerk",
+        "rest_min_duration",
+        "rest_max_duration",
+        "rest_settle_pos_tolerance",
+        "rest_settle_vel_tolerance",
+        "rest_settle_duration",
+        "rest_max_tracking_error",
     ):
         value = getattr(cfg, name)
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
-    if cfg.parking_min_duration > cfg.parking_max_duration:
-        raise ValueError("parking_min_duration exceeds parking_max_duration")
-    for name in ("parking_kp_scale", "parking_kd_scale"):
+    if cfg.rest_min_duration > cfg.rest_max_duration:
+        raise ValueError("rest_min_duration exceeds rest_max_duration")
+    for name in ("rest_kp_scale", "rest_kd_scale"):
         if not 0 < getattr(cfg, name) <= 1:
             raise ValueError(f"{name} must be in (0, 1]")
     if cfg.rest_pose is not None:
@@ -95,12 +95,12 @@ class SafetyLifecycle:
         if np.any(kp <= 0) or np.any(kd <= 0):
             raise ValueError("Position holding requires positive kp and kd gains")
         if scale:
-            kp *= self.config.parking_kp_scale
-            kd *= self.config.parking_kd_scale
+            kp *= self.config.rest_kp_scale
+            kd *= self.config.rest_kd_scale
         return kp, kd
 
     def emergency_stop(self) -> bool:
-        """Latch a zero-velocity position target; never travel to park or release torque.
+        """Latch a zero-velocity position target; never travel to rest pose or release torque.
 
         False means holding could not be confirmed; operator intervention is required.
         Further motion stays blocked even when holding fails.
@@ -126,7 +126,7 @@ class SafetyLifecycle:
                 return False
 
     def close(self):
-        if self._robot is not None and self.safety_state != "parked":
+        if self._robot is not None and self.safety_state != "at_rest":
             self.emergency_stop()
 
     def disconnect(self):
@@ -150,16 +150,16 @@ class SafetyLifecycle:
     def _quintic(u):
         return 10 * u**3 - 15 * u**4 + 6 * u**5, 30 * u**2 - 60 * u**3 + 30 * u**4
 
-    def _compute_parking_duration(self, delta):
+    def _compute_rest_duration(self, delta):
         c = self.config
         distance = float(np.max(np.abs(delta)))
         duration = max(
-            c.parking_min_duration,
-            1.875 * distance / c.parking_max_joint_velocity,
-            (10 / np.sqrt(3) * distance / c.parking_max_joint_acceleration) ** 0.5,
-            (60 * distance / c.parking_max_joint_jerk) ** (1 / 3),
+            c.rest_min_duration,
+            1.875 * distance / c.rest_max_joint_velocity,
+            (10 / np.sqrt(3) * distance / c.rest_max_joint_acceleration) ** 0.5,
+            (60 * distance / c.rest_max_joint_jerk) ** (1 / 3),
         )
-        return duration if duration <= c.parking_max_duration else None
+        return duration if duration <= c.rest_max_duration else None
 
     def _feedback(self):
         self._ensure_healthy()
@@ -177,9 +177,9 @@ class SafetyLifecycle:
                 raise RuntimeError(f"Joint feedback outside limits: {name}")
         return pos, vel
 
-    def _park_command(self, pos, vel, kp, kd):
+    def _rest_command(self, pos, vel, kp, kd):
         with self._motion_lock:
-            if self.safety_state != "parking":
+            if self.safety_state != "moving_to_rest":
                 raise RuntimeError("Parking interrupted by stop")
             self._ensure_healthy()
             self._robot.command_joint_state(
@@ -189,24 +189,24 @@ class SafetyLifecycle:
     def _settle(self, target, kp, kd, deadline):
         since = None
         while time.monotonic() < deadline:
-            self._park_command(target, np.zeros_like(target), kp, kd)
+            self._rest_command(target, np.zeros_like(target), kp, kd)
             pos, vel = self._feedback()
             now = time.monotonic()
-            if np.max(np.abs(pos - target)) > self.config.parking_max_tracking_error:
+            if np.max(np.abs(pos - target)) > self.config.rest_max_tracking_error:
                 raise RuntimeError("Parking tracking error")
             if (
-                np.max(np.abs(pos - target)) <= self.config.parking_settle_pos_tolerance
-                and np.max(np.abs(vel)) <= self.config.parking_settle_vel_tolerance
+                np.max(np.abs(pos - target)) <= self.config.rest_settle_pos_tolerance
+                and np.max(np.abs(vel)) <= self.config.rest_settle_vel_tolerance
             ):
                 since = now if since is None else since
-                if now - since >= self.config.parking_settle_duration:
+                if now - since >= self.config.rest_settle_duration:
                     return
             else:
                 since = None
             time.sleep(0.004)
         raise RuntimeError("Parking settle timeout")
 
-    def park_to_rest(self):
+    def move_to_rest(self):
         """Normal completion only. Hold first, then bounded quintic motion and settling.
 
         The gripper target stays at its starting position to retain a payload.
@@ -217,23 +217,23 @@ class SafetyLifecycle:
         with self._motion_lock:
             if self.safety_state != "active":
                 return False
-            self.safety_state = "parking"
+            self.safety_state = "moving_to_rest"
         try:
             if self.config.rest_pose is None:
-                raise RuntimeError("No park pose configured")
+                raise RuntimeError("No rest pose configured")
             start, _ = self._feedback()
             kp, kd = self._gains()
             self._settle(
                 start,
                 kp,
                 kd,
-                time.monotonic() + 1 + self.config.parking_settle_duration,
+                time.monotonic() + 1 + self.config.rest_settle_duration,
             )
             rest = np.array(self.config.rest_pose, dtype=float)
             if len(rest) == 7:
                 rest[-1] = start[-1]
             delta = rest - start
-            duration = self._compute_parking_duration(delta)
+            duration = self._compute_rest_duration(delta)
             if duration is None:
                 raise RuntimeError("Parking exceeds configured duration limits")
             kp, kd = self._gains(scale=True)
@@ -246,20 +246,20 @@ class SafetyLifecycle:
                 pos, _ = self._feedback()
                 if (
                     np.max(np.abs(pos - desired))
-                    > self.config.parking_max_tracking_error
+                    > self.config.rest_max_tracking_error
                 ):
                     raise RuntimeError("Parking tracking error")
-                self._park_command(desired, delta * ds / duration, kp, kd)
+                self._rest_command(desired, delta * ds / duration, kp, kd)
                 if u == 1:
                     break
                 time.sleep(0.004)
             self._settle(
-                rest, kp, kd, time.monotonic() + 1 + self.config.parking_settle_duration
+                rest, kp, kd, time.monotonic() + 1 + self.config.rest_settle_duration
             )
             with self._motion_lock:
-                if self.safety_state != "parking":
+                if self.safety_state != "moving_to_rest":
                     return False
-                self.safety_state = "parked"
+                self.safety_state = "at_rest"
             return True
         except BaseException as exc:
             self.emergency_stop()
@@ -272,12 +272,12 @@ class SafetyLifecycle:
     def controlled_shutdown(self):
         if self._robot is None:
             return ShutdownResult.NOT_CONNECTED
-        if self.safety_state == "parked" or self.park_to_rest():
+        if self.safety_state == "at_rest" or self.move_to_rest():
             with self._motion_lock:
-                if self.safety_state == "parked":
-                    if self.config.park_release_torque:
+                if self.safety_state == "at_rest":
+                    if self.config.rest_release_torque:
                         self.release_after_support()
-                    return ShutdownResult.PARKED
+                    return ShutdownResult.AT_REST
         return (
             ShutdownResult.HOLDING_FAULT
             if self.safety_state == "stopped"

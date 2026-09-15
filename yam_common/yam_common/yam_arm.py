@@ -123,24 +123,24 @@ class YAMArmConfig:
     lerobot_max_step: float = 5.0
     lerobot_gripper_max_step: float = 5.0
     rest_pose: Optional[tuple[float, ...]] = None
-    park_pose_path: Optional[str] = None
-    park_release_torque: bool = False
-    parking_max_joint_velocity: float = 1.0
-    parking_max_joint_acceleration: float = 2.0
-    parking_max_joint_jerk: float = 100.0
-    parking_min_duration: float = 1.0
-    parking_max_duration: float = 5.0
-    parking_kp_scale: float = 0.5
-    parking_kd_scale: float = 0.8
-    parking_settle_pos_tolerance: float = 0.03
-    parking_settle_vel_tolerance: float = 0.05
-    parking_settle_duration: float = 0.1
-    parking_max_tracking_error: float = 0.15
-    parking_decel_velocity_threshold: float = 0.1
+    rest_pose_path: Optional[str] = None
+    rest_release_torque: bool = False
+    rest_max_joint_velocity: float = 1.0
+    rest_max_joint_acceleration: float = 2.0
+    rest_max_joint_jerk: float = 100.0
+    rest_min_duration: float = 1.0
+    rest_max_duration: float = 5.0
+    rest_kp_scale: float = 0.5
+    rest_kd_scale: float = 0.8
+    rest_settle_pos_tolerance: float = 0.03
+    rest_settle_vel_tolerance: float = 0.05
+    rest_settle_duration: float = 0.1
+    rest_max_tracking_error: float = 0.15
+    rest_decel_velocity_threshold: float = 0.1
 
-    def validate_park_config(self) -> None:
-        from yam_common.safety import validate_park_config
-        validate_park_config(self)
+    def validate_rest_config(self) -> None:
+        from yam_common.safety import validate_rest_config
+        validate_rest_config(self)
 
     @property
     def arm_joint_names(self) -> tuple[str, ...]:
@@ -177,7 +177,7 @@ class YAMArmConfig:
             open_pos, closed_pos = self.gripper_limits
             if not (np.isfinite(float(open_pos)) and np.isfinite(float(closed_pos))):
                 raise ValueError("gripper_limits must be finite")
-        self.validate_park_config()
+        self.validate_rest_config()
 
 
 def motor_names_for_config(config: YAMArmConfig) -> list[str]:

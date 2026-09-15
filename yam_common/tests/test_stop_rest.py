@@ -1,4 +1,4 @@
-"""Regression tests for distinct stop and normal-park lifecycles."""
+"""Regression tests for distinct stop and normal-rest lifecycles."""
 
 import json
 import threading
@@ -15,8 +15,8 @@ def make_arm(robot=None, **options):
     config = dict(
         use_gravity_compensation=False,
         rest_pose=TEST_REST_POSE,
-        parking_min_duration=0.01,
-        parking_settle_duration=0.005,
+        rest_min_duration=0.01,
+        rest_settle_duration=0.005,
     )
     config.update(options)
     arm = YAMArm(YAMArmConfig(**config), robot_factory=lambda **kw: robot)
@@ -42,7 +42,7 @@ def test_stop_has_no_deceleration_trajectory_and_latches():
     ):
         with pytest.raises(RuntimeError, match="blocked"):
             call()
-    assert not arm.park_to_rest()
+    assert not arm.move_to_rest()
     arm.disconnect()
     assert not robot.closed
 
@@ -56,11 +56,11 @@ def test_failed_stop_is_not_reported_as_holding_or_released():
     assert not robot.closed and not robot.zero_torque
 
 
-def test_normal_park_keeps_gripper_and_holds_until_explicit_release():
+def test_normal_rest_keeps_gripper_and_holds_until_explicit_release():
     robot = FakeRobot(pos=np.array(TEST_REST_POSE) + 0.01)
     arm, robot = make_arm(robot)
     grip = robot.pos[-1]
-    assert arm.controlled_shutdown() is ShutdownResult.PARKED
+    assert arm.controlled_shutdown() is ShutdownResult.AT_REST
     np.testing.assert_allclose(robot.pos[:6], TEST_REST_POSE[:6])
     assert robot.pos[-1] == grip
     assert not robot.zero_torque and not robot.closed
@@ -70,17 +70,17 @@ def test_normal_park_keeps_gripper_and_holds_until_explicit_release():
     assert robot.closed and not arm.is_connected
 
 
-def test_supported_park_may_release_only_on_success():
-    arm, robot = make_arm(park_release_torque=True)
-    assert arm.controlled_shutdown() is ShutdownResult.PARKED
+def test_supported_rest_may_release_only_on_success():
+    arm, robot = make_arm(rest_release_torque=True)
+    assert arm.controlled_shutdown() is ShutdownResult.AT_REST
     assert robot.closed
 
 
 @pytest.mark.parametrize(
     "fault", ["missing", "timeout", "nan", "missing_velocity", "infeasible"]
 )
-def test_park_fault_never_releases(fault):
-    arm, robot = make_arm(park_release_torque=True)
+def test_rest_fault_never_releases(fault):
+    arm, robot = make_arm(rest_release_torque=True)
     if fault == "missing":
         arm.config.rest_pose = None
     elif fault == "timeout":
@@ -93,7 +93,7 @@ def test_park_fault_never_releases(fault):
             k: v for k, v in original().items() if k != "joint_vel"
         }
     else:
-        arm.config.parking_max_duration = 0.01
+        arm.config.rest_max_duration = 0.01
         robot.pos[0] = 1
     assert arm.controlled_shutdown() in (
         ShutdownResult.HOLDING_FAULT,
@@ -102,7 +102,7 @@ def test_park_fault_never_releases(fault):
     assert not robot.closed and not robot.zero_torque
 
 
-def test_stop_interrupts_park_and_no_target_follows_stop():
+def test_stop_interrupts_rest_and_no_target_follows_stop():
     arm, robot = make_arm(FakeRobot(pos=np.array(TEST_REST_POSE) + 0.05))
     sent = threading.Event()
     original = robot.command_joint_state
@@ -113,7 +113,7 @@ def test_stop_interrupts_park_and_no_target_follows_stop():
 
     robot.command_joint_state = command
     result = []
-    thread = threading.Thread(target=lambda: result.append(arm.park_to_rest()))
+    thread = threading.Thread(target=lambda: result.append(arm.move_to_rest()))
     thread.start()
     assert sent.wait(1)
     assert arm.emergency_stop()
@@ -128,29 +128,29 @@ def test_stop_interrupts_park_and_no_target_follows_stop():
 @pytest.mark.parametrize(
     "name,value",
     [
-        ("parking_min_duration", 0),
-        ("parking_max_duration", float("nan")),
-        ("parking_settle_vel_tolerance", 0),
-        ("parking_max_tracking_error", -1),
+        ("rest_min_duration", 0),
+        ("rest_max_duration", float("nan")),
+        ("rest_settle_vel_tolerance", 0),
+        ("rest_max_tracking_error", -1),
         ("rest_pose", (99,) * 7),
     ],
 )
-def test_invalid_park_config(name, value):
+def test_invalid_rest_config(name, value):
     with pytest.raises(ValueError):
         YAMArmConfig(**{name: value})
 
 
 def test_saved_pose_roundtrip_and_calibration_mismatch(tmp_path):
-    from yam_common.park_pose import pose_document
+    from yam_common.rest_pose import pose_document
 
     config = YAMArmConfig()
-    file = tmp_path / "park.json"
+    file = tmp_path / "rest.json"
     file.write_text(json.dumps(pose_document(config, TEST_REST_POSE)))
-    loaded = YAMArmConfig(park_pose_path=str(file))
+    loaded = YAMArmConfig(rest_pose_path=str(file))
     assert loaded.rest_pose == TEST_REST_POSE
     offsets = dict(config.motor_offsets, shoulder_pan=0.1)
     with pytest.raises(ValueError, match="motor_offsets"):
-        YAMArmConfig(park_pose_path=str(file), motor_offsets=offsets)
+        YAMArmConfig(rest_pose_path=str(file), motor_offsets=offsets)
 
 
 def test_low_level_stop_restores_gains_and_blocks_all_writers():

@@ -1,4 +1,4 @@
-"""Save a validated physical park pose: python -m yam_common.park_pose."""
+"""Save a validated physical rest pose: python -m yam_common.rest_pose."""
 
 import argparse
 import dataclasses
@@ -11,9 +11,9 @@ from yam_common import YAMArm, YAMArmConfig
 
 def pose_document(config, pose):
     # Validate in exactly the coordinate system used by this arm.
-    dataclasses.replace(config, rest_pose=tuple(pose), park_pose_path=None)
+    dataclasses.replace(config, rest_pose=tuple(pose), rest_pose_path=None)
     return {
-        "schema": "yam-park-v1",
+        "schema": "yam-rest-v1",
         "rest_pose": list(pose),
         "motor_offsets": config.motor_offsets,
         "motor_directions": config.motor_directions,
@@ -55,7 +55,7 @@ def main():
             arm = YAMArm(config)
             arm.connect()
             input(
-                "Position the arm at a supported park pose, then press ENTER to capture and HOLD: "
+                "Position the arm at a supported rest pose, then press ENTER to capture and HOLD: "
             )
             if not arm.emergency_stop():
                 raise RuntimeError("Stop failed; support the arm and check hardware")
@@ -65,7 +65,7 @@ def main():
             json.dump(document, file, indent=2)
             file.write("\n")
         print(
-            f"Saved {args.output}. Use --robot.park_pose_path={args.output.resolve()}"
+            f"Saved {args.output}. Use --robot.rest_pose_path={args.output.resolve()}"
         )
         if arm is not None:
             input(
