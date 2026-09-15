@@ -121,9 +121,15 @@ class YAMArmConfig:
     lerobot_max_step: float = 5.0
     lerobot_gripper_max_step: float = 5.0
     rest_pose: Optional[tuple[float, ...]] = None
-    soft_landing_duration: float = 3.0
-    soft_landing_kp_scale: float = 0.5
-    soft_landing_kd_scale: float = 0.8
+    parking_max_joint_velocity: float = 1.0
+    parking_max_joint_acceleration: float = 2.0
+    parking_min_duration: float = 1.0
+    parking_max_duration: float = 5.0
+    parking_kp_scale: float = 0.5
+    parking_kd_scale: float = 0.8
+    parking_settle_pos_tolerance: float = 0.03
+    parking_settle_vel_tolerance: float = 0.05
+    parking_settle_cycles: int = 25
 
     @property
     def arm_joint_names(self) -> tuple[str, ...]:
@@ -164,12 +170,14 @@ class YAMArmConfig:
             raise ValueError(f"rest_pose must have {len(names)} values")
         if not all(np.isfinite(float(value)) for value in self.rest_pose):
             raise ValueError("rest_pose values must be finite")
-        if not (np.isfinite(self.soft_landing_duration) and self.soft_landing_duration > 0):
-            raise ValueError("soft_landing_duration must be positive and finite")
-        if not (0.0 < self.soft_landing_kp_scale <= 1.0):
-            raise ValueError("soft_landing_kp_scale must be in (0, 1]")
-        if not (0.0 < self.soft_landing_kd_scale <= 1.0):
-            raise ValueError("soft_landing_kd_scale must be in (0, 1]")
+        if not (self.parking_max_joint_velocity > 0 and np.isfinite(self.parking_max_joint_velocity)):
+            raise ValueError("parking_max_joint_velocity must be positive and finite")
+        if not (self.parking_max_joint_acceleration > 0 and np.isfinite(self.parking_max_joint_acceleration)):
+            raise ValueError("parking_max_joint_acceleration must be positive and finite")
+        if not (0.0 < self.parking_kp_scale <= 1.0):
+            raise ValueError("parking_kp_scale must be in (0, 1]")
+        if not (0.0 < self.parking_kd_scale <= 1.0):
+            raise ValueError("parking_kd_scale must be in (0, 1]")
 
 
 def motor_names_for_config(config: YAMArmConfig) -> list[str]:
@@ -321,10 +329,10 @@ class YAMArm:
         self._shutdown_robot(wait_for_enter=True)
 
     def emergency_cleanup(self) -> None:
-        """Zero-torque and close CAN without interactive shutdown waiting."""
+        """Zero-torque and close CAN without parking or interactive waiting."""
         if self._robot is None:
             return
-        self._shutdown_robot(wait_for_enter=False)
+        self._shutdown_robot(wait_for_enter=False, park=False)
 
     def get_observation(self) -> dict[str, float]:
         self._ensure_healthy()
@@ -437,56 +445,110 @@ class YAMArm:
         except Exception:
             pass
 
-    def soft_land(self) -> bool:
-        """Move from current position to rest_pose over soft_landing_duration seconds.
+    @staticmethod
+    def _quintic(u: float) -> tuple[float, float]:
+        u2 = u * u
+        u3 = u2 * u
+        u4 = u2 * u2
+        u5 = u4 * u
+        s = 10.0 * u3 - 15.0 * u4 + 6.0 * u5
+        ds = 30.0 * u2 - 60.0 * u3 + 30.0 * u4
+        return s, ds
 
-        Returns True if rest_pose was reached, False on timeout or failure.
+    def _compute_parking_duration(self, delta_q: np.ndarray) -> float:
+        cfg = self.config
+        max_dq = float(np.max(np.abs(delta_q)))
+        if max_dq < 1e-6:
+            return cfg.parking_min_duration
+        t_vel = 1.875 * max_dq / cfg.parking_max_joint_velocity
+        t_acc = (5.7735 * max_dq / cfg.parking_max_joint_acceleration) ** 0.5
+        return float(np.clip(max(t_vel, t_acc), cfg.parking_min_duration, cfg.parking_max_duration))
+
+    def park_to_rest(self) -> bool:
+        """Quintic minimum-jerk trajectory from current position to rest_pose.
+
+        Returns True if rest_pose was reached and settled, False otherwise.
+        On failure the arm is left in HOLD (current position, gravity comp active).
         """
         if self._robot is None:
             return False
         rest = np.array(self.config.rest_pose, dtype=np.float64)
         start = self._robot.get_joint_pos()
-        duration = self.config.soft_landing_duration
+        delta_q = rest - start
+        duration = self._compute_parking_duration(delta_q)
         names = motor_names_for_config(self.config)
-        kp = np.array([self.config.kp_gains[n] * self.config.soft_landing_kp_scale for n in names])
-        kd = np.array([self.config.kd_gains[n] * self.config.soft_landing_kd_scale for n in names])
-        vel_ff = (rest - start) / duration
+        kp = np.array([self.config.kp_gains[n] * self.config.parking_kp_scale for n in names])
+        kd = np.array([self.config.kd_gains[n] * self.config.parking_kd_scale for n in names])
         step_interval = 0.004
-        threshold = 0.05
+        pos_tol = self.config.parking_settle_pos_tolerance
+        vel_tol = self.config.parking_settle_vel_tolerance
+        settle_target = self.config.parking_settle_cycles
 
+        logger.info("Parking to rest_pose (duration=%.2fs)", duration)
         t0 = time.monotonic()
-        while True:
-            elapsed = time.monotonic() - t0
-            if elapsed >= duration:
-                pos_now = self._robot.get_joint_pos()
-                return bool(np.all(np.abs(pos_now - rest) < threshold))
-            alpha = elapsed / duration
-            target = start + (rest - start) * alpha
-            self._robot.command_joint_state({
-                "pos": target,
-                "vel": vel_ff * (1.0 - alpha),
-                "kp": kp,
-                "kd": kd,
-            })
+        while time.monotonic() - t0 < duration:
+            u = min((time.monotonic() - t0) / duration, 1.0)
+            s, ds = self._quintic(u)
+            q_des = start + delta_q * s
+            qd_des = delta_q * (ds / duration)
+            self._robot.command_joint_state({"pos": q_des, "vel": qd_des, "kp": kp, "kd": kd})
             time.sleep(step_interval)
 
-    def _soft_land_safely(self) -> bool:
-        try:
-            landed = self.soft_land()
-            if landed:
-                logger.info("Soft landing complete — arm reached rest pose.")
-            else:
-                logger.warning("Soft landing timeout — falling back to zero-torque.")
-            return landed
-        except Exception as exc:
-            logger.exception("Soft landing failed: %s — falling back to zero-torque.", exc)
-            return False
+        self._robot.command_joint_state({"pos": rest, "vel": np.zeros_like(rest), "kp": kp, "kd": kd})
 
-    def _shutdown_robot(self, *, wait_for_enter: bool = True) -> None:
+        settle_count = 0
+        settle_deadline = time.monotonic() + 1.0
+        while time.monotonic() < settle_deadline:
+            obs = self._robot.get_observations()
+            pos_now = self._robot.get_joint_pos()
+            vel_now = obs.get("joint_vel", np.zeros_like(pos_now))
+            if float(np.max(np.abs(pos_now - rest))) < pos_tol and float(np.max(np.abs(vel_now))) < vel_tol:
+                settle_count += 1
+                if settle_count >= settle_target:
+                    return True
+            else:
+                settle_count = 0
+            time.sleep(step_interval)
+        return False
+
+    def emergency_stop(self) -> None:
+        """Decelerate to zero velocity and hold position (no trajectory to rest_pose)."""
+        if self._robot is None:
+            return
+        try:
+            pos = self._robot.get_joint_pos()
+            self._robot.command_joint_pos(pos)
+            logger.info("Emergency stop: holding at current position.")
+        except Exception as exc:
+            logger.exception("Emergency stop hold failed: %s", exc)
+            self._enter_zero_torque_mode_safely(reason="emergency_stop fallback", exc=exc)
+
+    def controlled_shutdown(self) -> None:
+        """Park to rest_pose then release. Falls back to HOLD on failure."""
+        if self._robot is None:
+            return
+        try:
+            parked = self.park_to_rest()
+            if parked:
+                logger.info("Controlled shutdown: parked at rest_pose, releasing.")
+                self._enter_zero_torque_mode_safely(reason="controlled_shutdown", exc=None)
+            else:
+                logger.warning("Controlled shutdown: parking incomplete, holding position.")
+        except Exception as exc:
+            logger.exception("Controlled shutdown failed: %s — holding position.", exc)
+            try:
+                pos = self._robot.get_joint_pos()
+                self._robot.command_joint_pos(pos)
+            except Exception:
+                self._enter_zero_torque_mode_safely(reason="controlled_shutdown fallback", exc=exc)
+
+    def _shutdown_robot(self, *, wait_for_enter: bool = True, park: bool = True) -> None:
         robot = self._robot
         try:
-            self._soft_land_safely()
-            self._enter_zero_torque_mode_safely(reason="disconnect", exc=None)
+            if park:
+                self.controlled_shutdown()
+            else:
+                self._enter_zero_torque_mode_safely(reason="emergency_cleanup", exc=None)
             if wait_for_enter:
                 self._hold_zero_gravity_before_shutdown()
             if robot is not None:

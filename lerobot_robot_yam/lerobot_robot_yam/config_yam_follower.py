@@ -177,12 +177,18 @@ class YAMFollowerConfig:
     lerobot_gripper_max_step: float = 5.0  # Max gripper step per cycle in [0,100]
 
     # =========================================================================
-    # Soft-landing (graceful shutdown to rest pose)
+    # Parking / controlled shutdown (graceful trajectory to rest pose)
     # =========================================================================
     rest_pose: tuple[float, ...] = (0.0, 1.57, 1.57, 0.0, 0.0, 0.0, 0.0)
-    soft_landing_duration: float = 3.0
-    soft_landing_kp_scale: float = 0.5
-    soft_landing_kd_scale: float = 0.8
+    parking_max_joint_velocity: float = 1.0
+    parking_max_joint_acceleration: float = 2.0
+    parking_min_duration: float = 1.0
+    parking_max_duration: float = 5.0
+    parking_kp_scale: float = 0.5
+    parking_kd_scale: float = 0.8
+    parking_settle_pos_tolerance: float = 0.03
+    parking_settle_vel_tolerance: float = 0.05
+    parking_settle_cycles: int = 25
 
 @RobotConfig.register_subclass("yam_follower")
 @dataclass

@@ -38,9 +38,15 @@ def yam_arm_config_from_follower(config: YAMFollowerRobotConfig) -> YAMArmConfig
         lerobot_max_step=config.lerobot_max_step,
         lerobot_gripper_max_step=config.lerobot_gripper_max_step,
         rest_pose=config.rest_pose,
-        soft_landing_duration=config.soft_landing_duration,
-        soft_landing_kp_scale=config.soft_landing_kp_scale,
-        soft_landing_kd_scale=config.soft_landing_kd_scale,
+        parking_max_joint_velocity=config.parking_max_joint_velocity,
+        parking_max_joint_acceleration=config.parking_max_joint_acceleration,
+        parking_min_duration=config.parking_min_duration,
+        parking_max_duration=config.parking_max_duration,
+        parking_kp_scale=config.parking_kp_scale,
+        parking_kd_scale=config.parking_kd_scale,
+        parking_settle_pos_tolerance=config.parking_settle_pos_tolerance,
+        parking_settle_vel_tolerance=config.parking_settle_vel_tolerance,
+        parking_settle_cycles=config.parking_settle_cycles,
     )
 
 
