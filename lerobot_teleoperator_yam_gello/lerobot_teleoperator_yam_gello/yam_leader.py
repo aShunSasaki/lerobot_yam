@@ -1,8 +1,8 @@
 """
 YAM Leader Teleoperator implementation for Lerobot.
 
-This teleoperator reads joint positions from a GELLO-style teaching arm
-using Dynamixel XL330 servos.
+This teleoperator reads joint positions from GELLO 01 using Dynamixel
+XC330-T288 and XM430-W210 servos.
 """
 
 import logging
@@ -25,7 +25,7 @@ class YAMLeader(Teleoperator):
     """
     Teleoperator implementation for YAM GELLO-style leader arm.
 
-    This class reads joint positions from Dynamixel XL330 servos and
+    This class reads joint positions from the GELLO 01 Dynamixel servos and
     outputs normalized values that can be sent to the follower robot.
 
     The leader arm has torque disabled, allowing the user to freely

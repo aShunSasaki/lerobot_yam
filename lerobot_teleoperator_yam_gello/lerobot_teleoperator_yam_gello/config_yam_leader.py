@@ -1,7 +1,7 @@
 """
-Configuration for YAM Leader teleoperator (GELLO-style).
+Configuration for the GELLO teleoperator used with YAM.
 
-The YAM leader uses Dynamixel XL330 servos for position sensing.
+GELLO 01 uses Dynamixel XC330-T288 and XM430-W210 servos for position sensing.
 It reads joint positions and outputs normalized values for the follower.
 """
 
@@ -16,8 +16,8 @@ class YAMLeaderConfig:
     """
     Configuration for YAM Leader teleoperator.
 
-    The leader uses Dynamixel XL330 servos (torque-disabled) to read
-    joint positions from a GELLO-style teaching arm.
+    GELLO 01 uses torque-disabled Dynamixel XC330-T288 and XM430-W210
+    servos to read joint positions.
     """
 
     # Serial port for Dynamixel bus
@@ -43,15 +43,15 @@ class YAMLeaderConfig:
     out_of_range_tolerance: float = 1.0
 
     # Motor configuration
-    # XL330-M288 for most joints, XL330-M077 for gripper (different gear ratio)
+    # GELLO 01 hardware order: XC330, XM430, XM430, XC330, XC330, XC330, XC330.
     motors: dict[str, Motor] = field(default_factory=lambda: {
-        "shoulder_pan": Motor(1, "xl330-m288", MotorNormMode.RANGE_M100_100),
-        "shoulder_lift": Motor(2, "xl330-m288", MotorNormMode.RANGE_M100_100),
-        "elbow_flex": Motor(3, "xl330-m288", MotorNormMode.RANGE_M100_100),
-        "wrist_flex": Motor(4, "xl330-m288", MotorNormMode.RANGE_M100_100),
-        "wrist_roll": Motor(5, "xl330-m288", MotorNormMode.RANGE_M100_100),
-        "wrist_yaw": Motor(6, "xl330-m288", MotorNormMode.RANGE_M100_100),
-        "gripper": Motor(7, "xl330-m077", MotorNormMode.RANGE_0_100),
+        "shoulder_pan": Motor(1, "xc330-t288", MotorNormMode.RANGE_M100_100),
+        "shoulder_lift": Motor(2, "xm430-w210", MotorNormMode.RANGE_M100_100),
+        "elbow_flex": Motor(3, "xm430-w210", MotorNormMode.RANGE_M100_100),
+        "wrist_flex": Motor(4, "xc330-t288", MotorNormMode.RANGE_M100_100),
+        "wrist_roll": Motor(5, "xc330-t288", MotorNormMode.RANGE_M100_100),
+        "wrist_yaw": Motor(6, "xc330-t288", MotorNormMode.RANGE_M100_100),
+        "gripper": Motor(7, "xc330-t288", MotorNormMode.RANGE_0_100),
     })
 
 
