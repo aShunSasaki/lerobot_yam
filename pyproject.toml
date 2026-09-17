@@ -34,8 +34,12 @@ packages = []
 py-modules = []
 
 [tool.pytest.ini_options]
-testpaths = ["yam_common/tests"]
-pythonpath = ["yam_common"]
-
-
+testpaths = [
+  "yam_common/tests",
+  "lerobot_teleoperator_yam_gello/tests",
+]
+pythonpath = [
+  "yam_common",
+  "lerobot_teleoperator_yam_gello",
+]
 
