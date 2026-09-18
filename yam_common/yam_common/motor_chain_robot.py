@@ -472,3 +472,28 @@ class MotorChainRobot:
             self._commands = commands
             self._kp, self._kd = kp.copy(), kd.copy()
             self._update_locked()
+
+    def compliant_stop(self, kp: np.ndarray, kd: np.ndarray) -> None:
+        """Latch a damped zero-gravity mode: low kp for compliance, kd for braking.
+
+        The arm decelerates via velocity damping and gravity compensation,
+        but yields to external force. Position drifts slowly due to gravity
+        comp error — this is intentional for collision safety.
+        """
+        with self._command_lock:
+            if self._safety_stopped:
+                self.raise_if_unhealthy()
+                return
+            self._safety_stopped = True
+            self.raise_if_unhealthy()
+            with self._state_lock:
+                pos = self._joint_state.pos.copy()
+            if not np.all(np.isfinite(pos)):
+                raise RuntimeError("Cannot hold non-finite feedback")
+            commands = JointCommands.init_all_zero(len(self.motor_chain))
+            commands.pos = self.remapper.to_robot_joint_pos_space(pos)
+            commands.kp = kp.copy()
+            commands.kd = kd.copy()
+            self._commands = commands
+            self._kp, self._kd = kp.copy(), kd.copy()
+            self._update_locked()

@@ -99,8 +99,14 @@ class SafetyLifecycle:
             kd *= self.config.rest_kd_scale
         return kp, kd
 
-    def soft_stop(self) -> bool:
-        """Latch a zero-velocity position target; never travel to rest pose or release torque.
+    def soft_stop(self, compliant: bool = True) -> bool:
+        """Latch a stop; never travel to rest pose or release torque.
+
+        compliant=True (default): low kp + normal kd + gravity comp.
+            Arm decelerates via damping but yields to external force.
+            Safer on collision — does not push back.
+        compliant=False: full kp + kd position hold.
+            Arm holds rigidly at current position.
 
         False means holding could not be confirmed; operator intervention is required.
         Further motion stays blocked even when holding fails.
@@ -110,14 +116,21 @@ class SafetyLifecycle:
                 return False
             if self.safety_state in ("stopped", "stop_failed"):
                 return self.safety_state == "stopped"
-            self.safety_state = "stop_failed"  # fail closed before touching hardware
+            self.safety_state = "stop_failed"
             try:
                 kp, kd = self._gains()
-                self._robot.soft_stop(kp, kd)
+                if compliant:
+                    compliant_kp = kp * 0.02
+                    self._robot.compliant_stop(compliant_kp, kd)
+                    logger.warning(
+                        "YAM compliant stop latched. Damped zero-gravity; arm can be moved by hand."
+                    )
+                else:
+                    self._robot.soft_stop(kp, kd)
+                    logger.warning(
+                        "YAM rigid stop latched. Holding current position."
+                    )
                 self.safety_state = "stopped"
-                logger.warning(
-                    "YAM stop latched. Holding current position; CAN remains connected."
-                )
                 return True
             except Exception:
                 logger.exception(
