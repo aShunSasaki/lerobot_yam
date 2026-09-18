@@ -17,8 +17,7 @@ uv run lerobot-teleoperate \
   --teleop.port=/dev/ttyUSB0
 ```
 
-Using an existing leader calibration file (for example `yam_lerobot.json` in the
-repo root):
+GELLO 01 の校正ファイル（`calibrations/gello-01.json`）を使用する場合：
 ```bash
 uv run lerobot-teleoperate \
   --robot.type=yam_follower \
@@ -26,11 +25,42 @@ uv run lerobot-teleoperate \
   --robot.gripper_type=crank_4310 \
   --teleop.type=yam_leader \
   --teleop.port=/dev/ttyUSB0 \
-  --teleop.calibration_dir=./ \
-  --teleop.id=yam_lerobot
+  --teleop.calibration_dir=./calibrations \
+  --teleop.id=gello-01
 ```
-`--teleop.id` is required when loading an existing calibration file, because
-LeRobot resolves calibration as `<teleop.calibration_dir>/<teleop.id>.json`.
+既存の校正ファイルを読み込む場合は `--teleop.id` が必要です。LeRobot は
+`<teleop.calibration_dir>/<teleop.id>.json` の形式で校正ファイルを参照します。
+
+## GELLO の単体動作確認
+
+YAM follower を接続する前に、GELLO の校正値、初期位置、関節方向を
+単体で確認できます。この試験は follower へ指令を送信しません。
+
+```bash
+uv run --project lerobot_teleoperator_yam_gello check-yam-leader \
+  --port=/dev/ttyUSB0 \
+  --calibration-dir=calibrations \
+  --id=gello-01
+```
+
+画面の指示に従い、次の項目を順番に確認します。
+
+- アーム 6 軸が初期姿勢で 0 rad から ±0.15 rad 以内であること
+- 各関節を YAM の定義上の正方向へ動かしたとき、角度差分が +0.10 rad 以上になること
+- 各関節を YAM の定義上の負方向へ動かしたとき、角度差分が -0.10 rad 以下になること
+- グリッパーの正規化値が、閉状態で 10 以下、開状態で 90 以上になること
+
+正負方向の基準はスクリプト側では自動判定できません。YAM の関節定義を確認しながら、
+指示された物理方向へ対象関節だけをゆっくり動かしてください。各測定では raw tick も
+表示されるため、`shoulder_pan` で 0–4095 tick の折り返しが発生していないかどうかも
+確認してください。全項目に合格した場合は終了コード 0、不合格項目がある場合は 1、
+設定エラーの場合は 2 を返します。
+
+判定ロジックと校正 JSON のユニットテストは次のコマンドで実行できます。
+
+```bash
+uv run pytest -q lerobot_teleoperator_yam_gello/tests/test_check_yam_leader.py
+```
 
 Note: this repo expects `lerobot` 0.4.3 features (plugin discovery in the
 standard CLIs). If 0.4.3 is not on PyPI, install it from
@@ -100,4 +130,3 @@ Safety step limits (normalized per‑cycle steps: joints in [-100, 100], gripper
 | `lerobot_teleoperator_yam_gello` | Leader teleoperator plugin |
 
 Install packages separately if you only need one component (e.g., follower‑only for policy inference).
-
